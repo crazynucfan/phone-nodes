@@ -1,0 +1,73 @@
+From c88baf9637324a5db43f4bc5e5c9e7712ee8a4da Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 18:32:30 +0100
+Subject: [PATCH 4/6] power: supply: qcom_battmgr: translate the firmware's USB
+ types
+
+The ADSP firmware reports USB adapter types in the numbering the 5.x
+kernels used, where BrickID (9) followed PD_PPS (8). The core has since
+inserted PD_SPR_AVS and PD_PPS_SPR_AVS at 9 and 10, so a raw 9 from the
+firmware now means PD_SPR_AVS, which the driver does not list in
+usb_types. The core then warns "driver reporting unavailable enum value
+9" on every read of usb_type and fails the uevent; on negroni with a PD
+Ethernet adapter that is ~200 lines a second, which drowns journald and
+with it every SSH login, sudo and container exec on the node.
+
+Translate the firmware value instead of passing it through: 0..8 are
+the same in both, 9 is BrickID, the Oplus PD_SDP (17) is PD, anything
+else is Unknown. Replaces the one-off PD_SDP special case.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/power/supply/qcom_battmgr.c | 28 +++++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 3983a9fe6..97645f756 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -1592,6 +1592,28 @@ static int qcom_battmgr_usb_sm8350_update(struct qcom_battmgr *battmgr,
+ 	return ret;
+ }
+ 
++/*
++ * The ADSP firmware reports USB adapter types in the numbering the 5.x
++ * kernels used, where BrickID followed PD_PPS. The core has since added
++ * PD_SPR_AVS and PD_PPS_SPR_AVS in between, and the Oplus firmware adds its
++ * own types (PD_SDP). Translate instead of passing the raw value through:
++ * the core rejects any value outside usb_types and warns on every read,
++ * which on negroni is hundreds of lines a second and drowns journald.
++ */
++static int qcom_battmgr_usb_type(unsigned int fw_type)
++{
++	switch (fw_type) {
++	case 0 ... 8:	/* UNKNOWN .. PD_PPS: same numbers in both */
++		return fw_type;
++	case 9:
++		return POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID;
++	case POWER_SUPPLY_USB_TYPE_PD_SDP:
++		return POWER_SUPPLY_USB_TYPE_PD;
++	default:
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++	}
++}
++
+ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+@@ -1630,11 +1652,7 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 		val->intval = battmgr->usb.current_limit;
+ 		break;
+ 	case POWER_SUPPLY_PROP_USB_TYPE:
+-		val->intval = battmgr->usb.usb_type;
+-		/* Oplus PD_SDP is not a core type; report it as PD instead of
+-		 * letting the core warn on every read (floods kmsg). */
+-		if (val->intval == POWER_SUPPLY_USB_TYPE_PD_SDP)
+-			val->intval = POWER_SUPPLY_USB_TYPE_PD;
++		val->intval = qcom_battmgr_usb_type(battmgr->usb.usb_type);
+ 		break;
+ 	default:
+ 		return -EINVAL;
+-- 
+2.43.0
+

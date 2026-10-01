@@ -1,0 +1,38 @@
+From 931f53d245d56f37dec8061a9af92e8c94d67636 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 23:08:06 +0100
+Subject: [PATCH 3/6] arm64: negroni_defconfig: watchdog built in, hung task
+ detector on
+
+The kexec loader on negroni can only fall back from a bad kernel if that
+kernel reboots instead of hanging, so the APSS watchdog must be there
+before any module loads. The hung task detector is what would have named
+the wait in a boot that stalls before userspace; it costs nothing on a
+node.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ arch/arm64/configs/negroni_defconfig | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/configs/negroni_defconfig b/arch/arm64/configs/negroni_defconfig
+index fede9713b..8accef6a9 100644
+--- a/arch/arm64/configs/negroni_defconfig
++++ b/arch/arm64/configs/negroni_defconfig
+@@ -746,7 +746,7 @@ CONFIG_WATCHDOG=y
+ CONFIG_WATCHDOG_CORE=y
+ CONFIG_XILINX_WATCHDOG=m
+ CONFIG_XILINX_WINDOW_WATCHDOG=m
+-CONFIG_QCOM_WDT=m
++CONFIG_QCOM_WDT=y
+ CONFIG_PM8916_WATCHDOG=m
+ CONFIG_MFD_SPMI_PMIC=y
+ CONFIG_MFD_QCOM_PM8008=m
+@@ -1325,3 +1325,4 @@ CONFIG_CORESIGHT_STM=m
+ CONFIG_CORESIGHT_CPU_DEBUG=m
+ CONFIG_CORESIGHT_CTI=m
+ CONFIG_MEMTEST=y
++CONFIG_DETECT_HUNG_TASK=y
+-- 
+2.43.0
+

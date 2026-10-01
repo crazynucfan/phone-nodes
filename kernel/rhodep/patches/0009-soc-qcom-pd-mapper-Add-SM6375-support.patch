@@ -1,0 +1,35 @@
+From 39a4f0718533eeb790b6356b7e97973ca88d9d60 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 19:14:35 +0100
+Subject: [PATCH 09/13] soc: qcom: pd-mapper: Add SM6375 support
+
+SM6375's remote processors have the same protection domains as SM6115's:
+the ADSP's root, sensor and audio domains, the CDSP's root domain, and
+the modem's root domain (with GPS) and its WLAN domain. The stock
+firmware's domain definitions (adspr, adsps, adspua, cdspr, modemr and
+modemuw .jsn) list exactly these.
+
+Without a match the in-kernel PD mapper does not register, the modem
+never starts its WLAN domain and ath10k waits for the WLAN firmware for
+ever.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/soc/qcom/qcom_pd_mapper.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/soc/qcom/qcom_pd_mapper.c b/drivers/soc/qcom/qcom_pd_mapper.c
+index 0dc1a7946..738c969e1 100644
+--- a/drivers/soc/qcom/qcom_pd_mapper.c
++++ b/drivers/soc/qcom/qcom_pd_mapper.c
+@@ -615,6 +615,7 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
+ 	{ .compatible = "qcom,sm4250", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm6115", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm6350", .data = sm6350_domains, },
++	{ .compatible = "qcom,sm6375", .data = sm6115_domains, },
+ 	{ .compatible = "qcom,sm7150", .data = sm7150_domains, },
+ 	{ .compatible = "qcom,sm7225", .data = sm6350_domains, },
+ 	{ .compatible = "qcom,sm7325", .data = sc7280_domains, },
+-- 
+2.43.0
+

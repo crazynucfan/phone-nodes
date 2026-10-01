@@ -1,0 +1,5 @@
+#!/bin/sh
+# Kernel package hook: turn the newly installed phone kernel into Android boot
+# images. Runs after /etc/kernel/postinst.d/initramfs-tools (alphabetical), so
+# /boot/initrd.img-$1 exists. $1 is the kernel release.
+exec /usr/local/sbin/phone-bootimg "$1"

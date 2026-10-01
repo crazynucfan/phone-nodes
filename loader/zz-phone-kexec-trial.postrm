@@ -1,0 +1,16 @@
+#!/bin/sh
+# Kernel postrm hook (/etc/kernel/postrm.d): forget a removed kernel in the
+# kexec loader's state so the loader never stages a kernel that is gone.
+set -e
+rel=${1:?kernel release}
+state=${PHONE_BOOT_STATE:-/var/lib/phone-boot/state}
+[ -f "$state" ] || exit 0
+good= trial= tries=0 launched= strikes=0
+. "$state"
+[ "$rel" = "$trial" ] && { trial=; tries=0; }
+[ "$rel" = "$good" ] && { good=; strikes=0; }
+[ "$rel" = "$launched" ] && launched=
+printf 'good=%s\ntrial=%s\ntries=%s\nlaunched=%s\nstrikes=%s\n' \
+    "${good:-}" "${trial:-}" "${tries:-0}" "${launched:-}" "${strikes:-0}" > "$state.tmp"
+mv "$state.tmp" "$state"
+sync

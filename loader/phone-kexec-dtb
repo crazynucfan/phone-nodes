@@ -1,0 +1,98 @@
+#!/bin/bash
+# Build the device tree for a kexec'd kernel: the running fdt plus reserved-memory
+# nodes for the GICv3 LPI/ITS tables the running kernel has programmed into the
+# redistributors. On this SoC LPIs cannot be disabled once enabled, so the next
+# kernel must find those tables in reserved memory and reuse them (the same
+# handover EFI systems get through the memreserve table). Without this, the next
+# kernel overwrites whatever now lives at those addresses.
+# A SoC without a GIC ITS (rhodep's SM6375) has no LPI tables: the running fdt
+# goes through unchanged (its own tree already describes the APSS watchdog,
+# so there is nothing to carry over either).
+#   phone-kexec-dtb <out.dtb> [<package.dtb>]
+#
+# With the next kernel's package DTB and PHONE_KEXEC_DTB_WATCHDOG=1, the APSS
+# watchdog node that DTB describes (and the bootloader's tree does not) is
+# carried over, with its clock resolved by path in the running tree. Off by
+# default: on negroni (2026-09-29) the kexec'd kernel went black and silent,
+# almost certainly EDL, as soon as its tree had the node, which fits the
+# watchdog being owned by the secure side on this phone.
+set -euo pipefail
+out=${1:?output dtb}
+pkg=${2:-}
+command -v dtc >/dev/null || { echo "dtc missing (device-tree-compiler)" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# Checked on the binary tree, before decompiling it: Motorola's bootloader
+# adds /chosen properties whose names dtc refuses to decompile.
+if ! grep -q -a 'arm,gic-v3-its' /sys/firmware/fdt; then
+    cp /sys/firmware/fdt "$out"
+    echo "$out: $(stat -c %s "$out") bytes, the running fdt (no GIC ITS, so no LPI tables to reserve)"
+    exit 0
+fi
+dtc -q -I dtb -O dts -o "$tmp/base.dts" /sys/firmware/fdt
+
+# name, physical address, size: from the running kernel's boot log
+# The kernel log of this boot: the journal keeps all of it, dmesg's ring buffer rotates.
+klog() {
+    journalctl -k -b -o cat > "$tmp/klog" 2>/dev/null || true
+    grep -q 'GICv3' "$tmp/klog" || dmesg | sed -E 's/^\[ *[0-9.]+\] //' > "$tmp/klog"
+    cat "$tmp/klog"
+}
+nodes=$(klog | awk '
+  /GICv3: using LPI property table @/        { sub(/.*@/, ""); printf "gic-lpi-prop %s 0x10000\n", $1 }
+  /GICv3: CPU[0-9]+: using (allocated|reserved) LPI pending table @/ { cpu=$2; sub(/:.*/, "", cpu); sub(/.*@/, ""); printf "gic-lpi-pend-%s %s 0x10000\n", tolower(cpu), $1 }
+  /ITS@.*: allocated .* Devices @/           { sub(/.*Devices @/, ""); split($0, a, " "); printf "gic-its-devices 0x%s 0x100000\n", a[1] }
+  /ITS@.*: allocated .* Interrupt Collections @/ { sub(/.*Collections @/, ""); split($0, a, " "); printf "gic-its-collections 0x%s 0x1000\n", a[1] }
+')
+# A kexec'd kernel was itself handed these reservations and reuses the tables
+# at the same addresses, so its own device tree is an equally good source.
+if [ -z "$nodes" ] && ls /proc/device-tree/reserved-memory/ | grep -q '^gic-'; then
+    nodes=$(cd /proc/device-tree/reserved-memory && for d in gic-*; do
+        name=${d%@*}
+        regs=$(od -An -tx1 -v "$d/reg" | tr -d ' \n')
+        echo "$name 0x$(printf '%s' "$regs" | cut -c1-16 | sed 's/^0*//') 0x$(printf '%s' "$regs" | cut -c17-32 | sed 's/^0*//')"
+    done)
+fi
+[ -n "$nodes" ] || { echo "no GIC LPI table addresses in the kernel log or the device tree" >&2; exit 1; }
+prop=$(printf '%s\n' "$nodes" | grep -c '^gic-lpi-prop ') ; pend=$(printf '%s\n' "$nodes" | grep -c '^gic-lpi-pend-')
+[ "$prop" = 1 ] && [ "$pend" = "$(nproc --all)" ] || { echo "unexpected table set: $prop property, $pend pending (cpus $(nproc --all))" >&2; printf '%s\n' "$nodes" >&2; exit 1; }
+
+{
+  cat "$tmp/base.dts"
+  echo '/ { reserved-memory {'
+  printf '%s\n' "$nodes" | while read -r name addr size; do
+    addr=$(( addr )); size=$(( size ))
+    printf '\t%s@%x { reg = <0x%x 0x%x 0x%x 0x%x>; };\n' "$name" "$addr" $(( addr >> 32 )) $(( addr & 0xffffffff )) $(( size >> 32 )) $(( size & 0xffffffff ))
+  done
+  echo '}; };'
+} > "$tmp/kexec.dts"
+dtc -q -I dts -O dtb -o "$out" "$tmp/kexec.dts"
+
+# Carry the watchdog over from the package DTB (see the header).
+carried=
+if [ "${PHONE_KEXEC_DTB_WATCHDOG:-0}" = 1 ] && [ -n "$pkg" ] && [ -s "$pkg" ]; then
+    w=$(fdtget -l "$pkg" /soc@0 2>/dev/null | grep -m1 '^watchdog@' || true)
+    if [ -n "$w" ] && ! fdtget -l "$out" /soc@0 | grep -q '^watchdog@'; then
+        n=/soc@0/$w
+        pclk=$(fdtget -t x "$pkg" "$n" clocks)
+        psleep=$(fdtget -t x "$pkg" /clocks/sleep-clk phandle 2>/dev/null || true)
+        rsleep=$(fdtget -t x "$out" /clocks/sleep-clk phandle 2>/dev/null || true)
+        if [ -n "$psleep" ] && [ "$pclk" = "$psleep" ] && [ -n "$rsleep" ]; then
+            fdtput -c "$out" "$n"
+            # shellcheck disable=SC2046 # a string list becomes one argument per string
+            fdtput -t s "$out" "$n" compatible $(fdtget "$pkg" "$n" compatible)
+            # shellcheck disable=SC2046
+            fdtput -t x "$out" "$n" reg $(fdtget -t x "$pkg" "$n" reg)
+            # shellcheck disable=SC2046
+            fdtput -t x "$out" "$n" interrupts $(fdtget -t x "$pkg" "$n" interrupts)
+            fdtput -t x "$out" "$n" clocks "$rsleep"
+            carried="$n"
+        else
+            echo "not carrying $n over: its clock is not the sleep clock (package $pclk, sleep clock ${psleep:-?}/${rsleep:-?})" >&2
+        fi
+    fi
+fi
+echo "$out: $(stat -c %s "$out") bytes, reserved for the next kernel:"
+printf '%s\n' "$nodes" | awk '{ printf "  %-22s %s +%s\n", $1, $2, $3 }'
+[ -z "$carried" ] || echo "carried over from the package DTB: $carried"

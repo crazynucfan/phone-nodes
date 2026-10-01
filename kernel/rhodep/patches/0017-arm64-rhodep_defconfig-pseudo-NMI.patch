@@ -1,0 +1,45 @@
+From ff97e057c90c80149abfd43bac3a666d54444048 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 19:13:58 +0000
+Subject: [PATCH] arm64: rhodep_defconfig: pseudo-NMI
+
+About 1 in 5 kexec'd kernels on rhodep hung in their first 50 ms: CPU 6,
+the first Cortex-A78, came up ("Booted secondary processor") and then
+took no interrupt at all, neither its timer nor IPIs, so the first
+cross-CPU call (a static key enable at crc_t10dif_mod_init) waited
+forever. Every one of the 8 captured failures was CPU 6. The previous
+kernel's handover was clean (every core off in 0 ms), and cold boots are
+not affected.
+
+With pseudo-NMI (and irqchip.gicv3_pseudo_nmi=1 on the command line)
+the hang did not occur in 36 launches (the rate before would have given
+about 7). A plausible reading: pseudo-NMI masks interrupts through the
+GIC priority mask (ICC_PMR_EL1) and rewrites it on every enable, while
+without it the mask is written once at bring-up, so a CPU interface left
+masking everything (by firmware restoring stale state after the kexec)
+sleeps in WFI for good. It also gives the lockup detector NMI
+backtraces, which this investigation lacked.
+
+The option only takes effect with irqchip.gicv3_pseudo_nmi=1, which the
+kexec loader passes on rhodep (PHONE_KEXEC_ARGS in /etc/default/phone-boot).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/configs/rhodep_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/configs/rhodep_defconfig b/arch/arm64/configs/rhodep_defconfig
+index 5af3e701e..8de656ea9 100644
+--- a/arch/arm64/configs/rhodep_defconfig
++++ b/arch/arm64/configs/rhodep_defconfig
+@@ -1203,6 +1203,7 @@ CONFIG_CORESIGHT_STM=m
+ CONFIG_CORESIGHT_CPU_DEBUG=m
+ CONFIG_CORESIGHT_CTI=m
+ CONFIG_MEMTEST=y
++CONFIG_ARM64_PSEUDO_NMI=y
+ CONFIG_PANIC_ON_OOPS=y
+ CONFIG_PANIC_TIMEOUT=10
+ CONFIG_SOFTLOCKUP_DETECTOR=y
+-- 
+2.47.3
+

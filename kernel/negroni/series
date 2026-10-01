@@ -1,0 +1,6 @@
+0001-arm64-qcom-sm8450-OnePlus-10-Pro-negroni-support-for.patch
+0002-TEMPORARY-Revert-bpf-Add-validation-for-bpf_set_retv.patch
+0003-arm64-negroni_defconfig-watchdog-built-in-hung-task-.patch
+0004-power-supply-qcom_battmgr-translate-the-firmware-s-U.patch
+0005-arm64-negroni_defconfig-panic-and-reboot-on-lockups.patch
+0006-arm64-negroni_defconfig-kernel-BTF.patch

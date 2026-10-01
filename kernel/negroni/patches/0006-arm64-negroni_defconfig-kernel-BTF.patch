@@ -1,0 +1,32 @@
+From 82231b3744019e43241534096b698bb87cb2fed6 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 15:31:33 +0100
+Subject: [PATCH 6/6] arm64: negroni_defconfig: kernel BTF
+
+Cilium's BPF masquerade program needs kernel BTF (without it the
+verifier rejects tail_handle_snat_fwd_ipv4), and from Cilium 1.19.8 and
+1.20.2 on so do its socket-LB programs. Build with full DWARF instead
+of the reduced kind and generate BTF for the kernel and its modules
+(/sys/kernel/btf/vmlinux), like Debian's own kernels.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/configs/negroni_defconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/configs/negroni_defconfig b/arch/arm64/configs/negroni_defconfig
+index 71a3e1135..824bf1eaf 100644
+--- a/arch/arm64/configs/negroni_defconfig
++++ b/arch/arm64/configs/negroni_defconfig
+@@ -1312,7 +1312,7 @@ CONFIG_IRQ_POLL=y
+ CONFIG_PRINTK_TIME=y
+ CONFIG_DEBUG_KERNEL=y
+ CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+-CONFIG_DEBUG_INFO_REDUCED=y
++CONFIG_DEBUG_INFO_BTF=y
+ CONFIG_MAGIC_SYSRQ=y
+ CONFIG_SCHEDSTATS=y
+ # CONFIG_FTRACE is not set
+-- 
+2.43.0
+

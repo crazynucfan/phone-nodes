@@ -1,0 +1,53 @@
+From e2db80ca07c390d31a676ab7d8a60135f5d918cf Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 21:03:02 +0100
+Subject: [PATCH 11/13] power: supply: bq256xx: Enable charging at probe
+
+The driver programs the charge voltage and current limits at probe but
+never the charge enable bit (CHG_CONFIG), assuming the reset default.
+Motorola's bootloader on the moto g82 5G (SGM41542) leaves it cleared,
+so the phone never charged under Linux. Set it in hw_init, after the
+watchdog and before the limits.
+
+Also read CHARGER_CONTROL_0 from the chip rather than the register
+cache: it holds CHG_CONFIG and the self-clearing watchdog reset, and a
+cached copy that disagreed with the chip turned a charge_type write into
+a no-op.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/power/supply/bq256xx_charger.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/power/supply/bq256xx_charger.c b/drivers/power/supply/bq256xx_charger.c
+index 945b85c2f..60541ad3d 100644
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -1272,6 +1272,7 @@ static bool bq256xx_is_volatile_reg(struct device *dev, unsigned int reg)
+ {
+ 	switch (reg) {
+ 	case BQ256XX_INPUT_CURRENT_LIMIT:
++	case BQ256XX_CHARGER_CONTROL_0:
+ 	case BQ256XX_CHARGER_STATUS_0...BQ256XX_CHARGER_STATUS_2:
+ 		return true;
+ 	default:
+@@ -1614,6 +1615,16 @@ static int bq256xx_hw_init(struct bq256xx_device *bq)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Charging is enabled at reset, but a bootloader may have turned it
++	 * off; the limits programmed below are what keep it safe.
++	 */
++	ret = regmap_update_bits(bq->regmap, BQ256XX_CHARGER_CONTROL_0,
++				 BQ256XX_CHG_CONFIG_MASK,
++				 BQ256XX_CHG_CONFIG_MASK);
++	if (ret)
++		return ret;
++
+ 	ret = power_supply_get_battery_info(bq->charger, &bat_info);
+ 	if (ret == -ENOMEM)
+ 		return ret;
+-- 
+2.43.0
+

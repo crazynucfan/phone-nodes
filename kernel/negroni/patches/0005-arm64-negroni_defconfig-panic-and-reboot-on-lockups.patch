@@ -1,0 +1,38 @@
+From 2ded4a3f9d44bc8a5489d02b8e246801924ca588 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 20:35:45 +0100
+Subject: [PATCH 5/6] arm64: negroni_defconfig: panic and reboot on lockups
+
+A kernel that hangs on negroni only comes back if it panics: the APSS
+watchdog belongs to the secure side on this phone (describing it sends
+the kexec'd kernel to EDL), so nothing resets a wedged node. Turn the
+soft and hard lockup detectors on with panic, the hard one in buddy
+mode (there is no pseudo-NMI for the perf one), and panic on oops with
+a 10 s reboot. The last two are what the kubelet sets at runtime, but
+only once k3s is up; built in, a crash during boot reboots too.
+test_lockup is there to drill each of them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/configs/negroni_defconfig | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/configs/negroni_defconfig b/arch/arm64/configs/negroni_defconfig
+index 8accef6a9..71a3e1135 100644
+--- a/arch/arm64/configs/negroni_defconfig
++++ b/arch/arm64/configs/negroni_defconfig
+@@ -1325,4 +1325,11 @@ CONFIG_CORESIGHT_STM=m
+ CONFIG_CORESIGHT_CPU_DEBUG=m
+ CONFIG_CORESIGHT_CTI=m
+ CONFIG_MEMTEST=y
++CONFIG_PANIC_ON_OOPS=y
++CONFIG_PANIC_TIMEOUT=10
++CONFIG_SOFTLOCKUP_DETECTOR=y
++CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=1
++CONFIG_HARDLOCKUP_DETECTOR=y
++CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
+ CONFIG_DETECT_HUNG_TASK=y
++CONFIG_TEST_LOCKUP=m
+-- 
+2.43.0
+

@@ -1,0 +1,133 @@
+From b9fd6a88a90171bccbf3fe3e424b8fe98714680b Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 07:56:26 +0100
+Subject: [PATCH 08/13] arm64: dts: qcom: sm6375: UFS without ICE, correct
+ removed region, rhodep memory and SDAM
+
+Three things the first boots of rhodep showed:
+
+- The UFS host's ICE range is left out. The address is a different block
+  on SM6375 and touching it hangs the CPU (as the postmarketOS rhodep port
+  found); UFS crypto is off in the configuration anyway.
+- The firmware's removed region is 0x7100000 long on this SoC (blair.dtsi
+  downstream), not 0x5100000; the smaller value hands 32 MiB of
+  TrustZone-owned memory to Linux.
+- rhodep populates its memory node with the first 2 GiB, since Motorola's
+  bootloader does not always fill it in, and rhodep_defconfig enables the
+  SPMI SDAM nvmem driver so the PMK8350's reboot-mode node probes rather
+  than waiting for its supplier for ever. (The bootloader reads the reboot
+  reason from the PM6125 PON register, which qcom-pon writes: that is what
+  makes `reboot bootloader` reach fastboot.)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../devicetree/bindings/ufs/qcom,ufs.yaml     | 26 ++++++++++++++++++-
+ .../boot/dts/qcom/sm6375-motorola-rhodep.dts  |  9 +++++++
+ arch/arm64/boot/dts/qcom/sm6375.dtsi          |  6 ++---
+ arch/arm64/configs/rhodep_defconfig           |  2 +-
+ 4 files changed, 37 insertions(+), 6 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/ufs/qcom,ufs.yaml b/Documentation/devicetree/bindings/ufs/qcom,ufs.yaml
+index 6ca1356dd..6fbd15b7e 100644
+--- a/Documentation/devicetree/bindings/ufs/qcom,ufs.yaml
++++ b/Documentation/devicetree/bindings/ufs/qcom,ufs.yaml
+@@ -130,7 +130,6 @@ allOf:
+               - qcom,qcs615-ufshc
+               - qcom,sm6115-ufshc
+               - qcom,sm6125-ufshc
+-              - qcom,sm6375-ufshc
+     then:
+       properties:
+         clocks:
+@@ -153,6 +152,31 @@ allOf:
+       required:
+         - reg-names
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - qcom,sm6375-ufshc
++    then:
++      properties:
++        clocks:
++          minItems: 8
++          maxItems: 8
++        clock-names:
++          items:
++            - const: core_clk
++            - const: bus_aggr_clk
++            - const: iface_clk
++            - const: core_clk_unipro
++            - const: ref_clk
++            - const: tx_lane0_sync_clk
++            - const: rx_lane0_sync_clk
++            - const: ice_core_clk
++        reg:
++          maxItems: 1
++        reg-names: false
++
+     # TODO: define clock bindings for qcom,msm8994-ufshc
+ 
+   - if:
+diff --git a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+index 4d20628b6..fdd1073ef 100644
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -90,6 +90,15 @@ key-volume-up {
+ 		};
+ 	};
+ 
++	/*
++	 * Populated here because Motorola's bootloader does not always fill
++	 * the memory node in; the first 2 GiB are safe on every variant.
++	 */
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x0 0x80000000>;
++	};
++
+ 	reserved-memory {
+ 		cont_splash_mem: memory@85200000 {
+ 			reg = <0 0x85200000 0 0xc00000>;
+diff --git a/arch/arm64/boot/dts/qcom/sm6375.dtsi b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+index 19f0196ee..20a080c2a 100644
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -612,7 +612,7 @@ pil_mpss_wlan_mem: pil-mpss-wlan@8b800000 {
+ 		};
+ 
+ 		removed_mem: removed@c0000000 {
+-			reg = <0 0xc0000000 0 0x5100000>;
++			reg = <0 0xc0000000 0 0x7100000>;
+ 			no-map;
+ 		};
+ 
+@@ -1078,9 +1078,7 @@ opp-202000000 {
+ 
+ 		ufs_mem_hc: ufshc@4804000 {
+ 			compatible = "qcom,sm6375-ufshc", "qcom,ufshc", "jedec,ufs-2.0";
+-			reg = <0 0x04804000 0 0x3000>,
+-			      <0 0x04808000 0 0x8000>;
+-			reg-names = "std", "ice";
++			reg = <0 0x04804000 0 0x3000>;
+ 			interrupts = <GIC_SPI 356 IRQ_TYPE_LEVEL_HIGH>;
+ 			phys = <&ufs_mem_phy>;
+ 			phy-names = "ufsphy";
+diff --git a/arch/arm64/configs/rhodep_defconfig b/arch/arm64/configs/rhodep_defconfig
+index eebbd0842..54806fc54 100644
+--- a/arch/arm64/configs/rhodep_defconfig
++++ b/arch/arm64/configs/rhodep_defconfig
+@@ -1106,7 +1106,7 @@ CONFIG_ANDROID_BINDER_IPC=y
+ CONFIG_NVMEM_LAYOUT_SL28_VPD=m
+ CONFIG_NVMEM_QCOM_QFPROM=y
+ CONFIG_NVMEM_QCOM_SEC_QFPROM=m
+-CONFIG_NVMEM_SPMI_SDAM=m
++CONFIG_NVMEM_SPMI_SDAM=y
+ CONFIG_TEE=y
+ CONFIG_OPTEE=y
+ CONFIG_QCOMTEE=m
+-- 
+2.43.0
+

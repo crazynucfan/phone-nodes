@@ -1,0 +1,108 @@
+#!/usr/bin/python3
+"""Mark an A/B slot successful the way Qualcomm's boot control does.
+
+    qcom-slot-successful [--apply] [slot]     # slot: a or b; default: the booted one
+    qcom-slot-successful --unmark [--apply] [slot]
+                                     # what `fastboot --set-active` does to the
+                                     # state: not successful, 7 tries (after
+                                     # writing a new boot image from Linux)
+
+The bootloader keeps each slot's state in the GPT attribute bits of its boot
+partition (boot_a / boot_b): priority 48-49, active 50, retry count 51-53,
+successful 54, unbootable 55. `fastboot --set-active` clears "successful" and
+sets the retry count to 7; every boot of an unsuccessful slot costs one retry,
+and at 0 the bootloader marks it unbootable and falls back to the other slot.
+
+This sets "successful" and clears "unbootable" in the boot partition's entry of
+the primary and the backup table, and recomputes their CRCs; nothing else in
+the table changes (unlike sgdisk, which would also grow this phone's
+21-entry tables to the GPT minimum). Without --apply it only shows what it
+would write.
+"""
+import os, struct, sys, zlib
+
+SUCCESSFUL, UNBOOTABLE = 1 << 54, 1 << 55
+RETRY_SHIFT, RETRY_MASK = 51, 7 << 51
+
+
+def slot_from_cmdline():
+    for arg in open('/proc/cmdline').read().split():
+        if arg.startswith('androidboot.slot_suffix='):
+            return arg.split('=', 1)[1].lstrip('_')
+    return None
+
+
+def disk_of(label):
+    part = os.path.realpath(f'/dev/disk/by-partlabel/{label}')
+    name = os.path.basename(part)
+    disk = os.path.basename(os.path.realpath(f'/sys/class/block/{name}/..'))
+    return f'/dev/{disk}', int(open(f'/sys/class/block/{name}/logical_block_size').read()
+                                if os.path.exists(f'/sys/class/block/{name}/logical_block_size')
+                                else open(f'/sys/class/block/{disk}/queue/logical_block_size').read())
+
+
+def read_table(f, lba, ss):
+    f.seek(lba * ss)
+    hdr = bytearray(f.read(ss))
+    if hdr[:8] != b'EFI PART':
+        raise SystemExit(f'no GPT header at LBA {lba}')
+    hsize, = struct.unpack_from('<I', hdr, 12)
+    ent_lba, n, esize, ecrc = struct.unpack_from('<QIII', hdr, 72)
+    f.seek(ent_lba * ss)
+    ents = bytearray(f.read(n * esize))
+    chk = bytearray(hdr[:hsize]); struct.pack_into('<I', chk, 16, 0)
+    if zlib.crc32(chk) != struct.unpack_from('<I', hdr, 16)[0] or zlib.crc32(ents) != ecrc:
+        raise SystemExit(f'CRC mismatch in the table at LBA {lba}; not touching it')
+    return hdr, hsize, ent_lba, n, esize, ents
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a not in ('--apply', '--unmark')]
+    apply = '--apply' in sys.argv[1:]
+    unmark = '--unmark' in sys.argv[1:]
+    slot = args[0] if args else slot_from_cmdline()
+    if slot not in ('a', 'b'):
+        raise SystemExit('which slot? (no androidboot.slot_suffix on the command line)')
+    label = f'boot_{slot}'
+    dev, ss = disk_of(label)
+    with open(dev, 'r+b' if apply else 'rb', buffering=0) as f:
+        primary = read_table(f, 1, ss)
+        backup_lba, = struct.unpack_from('<Q', primary[0], 32)
+        writes = []
+        for lba, (hdr, hsize, ent_lba, n, esize, ents) in ((1, primary), (backup_lba, read_table(f, backup_lba, ss))):
+            for i in range(n):
+                e = memoryview(ents)[i * esize:(i + 1) * esize]
+                if bytes(e[56:128]).decode('utf-16-le').rstrip('\0') == label:
+                    break
+            else:
+                raise SystemExit(f'{label} not in the table at LBA {lba}')
+            old, = struct.unpack_from('<Q', ents, i * esize + 48)
+            if unmark:
+                new = (old & ~(SUCCESSFUL | UNBOOTABLE | RETRY_MASK)) | (7 << RETRY_SHIFT)
+            else:
+                new = (old | SUCCESSFUL) & ~UNBOOTABLE
+            print(f'{dev} LBA {lba}: {label} (entry {i + 1}) attributes {old:016x} -> {new:016x}'
+                  f' (retry {(old >> 51) & 7} -> {(new >> 51) & 7}, successful {old >> 54 & 1} -> {new >> 54 & 1})')
+            if new == old:
+                continue
+            struct.pack_into('<Q', ents, i * esize + 48, new)
+            struct.pack_into('<I', hdr, 88, zlib.crc32(ents))
+            struct.pack_into('<I', hdr, 16, 0)
+            struct.pack_into('<I', hdr, 16, zlib.crc32(bytes(hdr[:hsize])))
+            writes += [(ent_lba * ss, bytes(ents)), (lba * ss, bytes(hdr))]
+        if not writes:
+            print('nothing to change')
+            return
+        if not apply:
+            print('dry run; --apply writes it')
+            return
+        for off, data in writes:        # entries before headers, primary then backup
+            f.seek(off); f.write(data)
+        os.fsync(f.fileno())
+    for lba in (1, backup_lba):         # read back and check
+        with open(dev, 'rb') as f:
+            read_table(f, lba, ss)
+    print('written and verified')
+
+
+main()

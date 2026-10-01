@@ -1,0 +1,111 @@
+From 55f9634862b7df57d845d3380ebde47334a4838a Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 01:08:40 +0100
+Subject: [PATCH 06/13] arm64: dts: qcom: sm6375-motorola-rhodep: Add the
+ charger
+
+The battery charger is an SGM41542 on I2C8 (0x3b) with its interrupt on
+GPIO 12. The node spends its life on a charger, so the battery node caps
+the charge voltage at 4.1 V (the cell is rated for 4.45 V and the stock
+kernel charges to 4.35 V) and the charge current at 1 A. The driver
+programs both at probe, clamped to these limits, and with its I2C
+watchdog off the chip keeps them without a host. The input current
+limit is 2 A, for the charger passed through the node's USB-C Ethernet
+adapter.
+
+rhodep_defconfig builds the charger driver as a module.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/sm6375-motorola-rhodep.dts  | 48 +++++++++++++++++--
+ arch/arm64/configs/rhodep_defconfig           |  1 +
+ 2 files changed, 45 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+index 4271d11e9..4d20628b6 100644
+--- a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -32,6 +32,22 @@ / {
+ 	qcom,msm-id = <QCOM_ID_SM6375 0x10000>;
+ 	qcom,board-id = <0 0>;
+ 
++	/*
++	 * The node lives on a charger, so the charger stops at 4.1 V (about
++	 * three quarters full) and charges gently. The cell itself is rated
++	 * for 4.45 V; the stock kernel charges to 4.35 V.
++	 */
++	battery: battery {
++		compatible = "simple-battery";
++		charge-full-design-microamp-hours = <5000000>;
++		voltage-min-design-microvolt = <3400000>;
++		voltage-max-design-microvolt = <4450000>;
++		constant-charge-voltage-max-microvolt = <4100000>;
++		constant-charge-current-max-microamp = <1000000>;
++		precharge-current-microamp = <180000>;
++		charge-term-current-microamp = <180000>;
++	};
++
+ 	chosen {
+ 		#address-cells = <2>;
+ 		#size-cells = <2>;
+@@ -115,10 +131,27 @@ &i2c8 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+ 
+-	/*
+-	 * Charger (SGM41542, 0x3b), Type-C CC logic (SGM7220, 0x47) and
+-	 * fuel gauge (CW2217, 0x64).
+-	 */
++	/* Type-C CC logic (SGM7220, 0x47) and fuel gauge (CW2217, 0x64) */
++
++	charger@3b {
++		compatible = "sgmicro,sgm41542";
++		reg = <0x3b>;
++
++		interrupts-extended = <&tlmm 12 IRQ_TYPE_EDGE_FALLING>;
++		pinctrl-0 = <&charger_int_default>;
++		pinctrl-names = "default";
++
++		/*
++		 * The node is powered through its USB-C Ethernet adapter's
++		 * charger pass-through. The chip's own input source detection
++		 * may lower this limit again on plug-in.
++		 */
++		input-current-limit-microamp = <2000000>;
++		input-voltage-limit-microvolt = <4500000>;
++		/* No I2C watchdog: the limits above must hold without a host */
++		ti,watchdog-timeout-ms = <0>;
++		monitored-battery = <&battery>;
++	};
+ };
+ 
+ &pmk8350_adc_tm {
+@@ -382,6 +415,13 @@ &sdhc_2 {
+ &tlmm {
+ 	/* Fingerprint sensor SPI, owned by TrustZone */
+ 	gpio-reserved-ranges = <13 4>;
++
++	charger_int_default: charger-int-default-state {
++		pins = "gpio12";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
+ };
+ 
+ &ufs_mem_hc {
+diff --git a/arch/arm64/configs/rhodep_defconfig b/arch/arm64/configs/rhodep_defconfig
+index ff27187ba..eebbd0842 100644
+--- a/arch/arm64/configs/rhodep_defconfig
++++ b/arch/arm64/configs/rhodep_defconfig
+@@ -721,6 +721,7 @@ CONFIG_POWER_SEQUENCING_PCIE_M2=m
+ CONFIG_BATTERY_BQ27XXX=y
+ CONFIG_CHARGER_BQ25890=m
+ CONFIG_CHARGER_BQ25980=m
++CONFIG_CHARGER_BQ256XX=m
+ CONFIG_SENSORS_ARM_SCMI=y
+ CONFIG_SENSORS_GPIO_FAN=m
+ CONFIG_SENSORS_JC42=m
+-- 
+2.43.0
+

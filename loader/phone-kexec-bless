@@ -1,0 +1,74 @@
+#!/bin/bash
+# Health check for a kexec'd kernel (see phone-kexec-loader). Runs after the
+# node has had time to come up. When the running kernel is the one the loader
+# launched and the node is healthy, the launch is blessed: a trial becomes
+# good, and the good kernel's strikes are cleared. When it is not healthy
+# within the deadline, the node reboots: the bootloader kernel runs the loader
+# again, which charges the failed launch to that kernel (a try for the trial,
+# a strike for good) and falls back once they are used up.
+#
+# Health means: a default route, the k3s agent active, and the kubelet
+# answering on its healthz port (the node is then Ready from the cluster's
+# side, or about to be). Kernels kexec'd by hand (phone-kexec-test go) are
+# checked and logged but never rebooted.
+set -uo pipefail
+state=${PHONE_BOOT_STATE:-/var/lib/phone-boot/state}
+run=${PHONE_BOOT_RUN:-/run/phone-boot}
+deadline=${PHONE_BOOT_HEALTH_DEADLINE:-600}
+# The loader runs before the journal is flushed to disk, so its messages
+# would not survive the kexec; they also go to a small log next to the state.
+logfile=${PHONE_BOOT_LOG:-$(dirname "$state")/log}
+log() {
+    echo "phone-kexec-bless: $*"
+    logger -t phone-kexec-bless -- "$*" 2>/dev/null || true
+    { mkdir -p "$(dirname "$logfile")" && echo "$(date -Is) phone-kexec-bless [$(uname -r)]: $*" >> "$logfile" && sync "$logfile"; } 2>/dev/null || true
+    if [ "$(wc -l < "$logfile" 2>/dev/null || echo 0)" -gt 2000 ]; then tail -n 1000 "$logfile" > "$logfile.tmp" && mv "$logfile.tmp" "$logfile"; fi 2>/dev/null || true
+}
+
+[ -f "$run/kexec-booted" ] || { log "bootloader boot, nothing to bless"; exit 0; }
+running=${PHONE_BOOT_RUNNING:-$(uname -r)}
+good= trial= tries=0 launched= strikes=0
+# shellcheck source=/dev/null
+[ -f "$state" ] && . "$state"
+save() {
+    printf 'good=%s\ntrial=%s\ntries=%s\nlaunched=%s\nstrikes=%s\n' \
+        "${good:-}" "${trial:-}" "${tries:-0}" "${launched:-}" "${strikes:-0}" > "$state.tmp"
+    mv "$state.tmp" "$state"
+    sync "$state" 2>/dev/null || sync
+}
+
+healthy() {
+    if [ -n "${PHONE_BOOT_HEALTH_CMD:-}" ]; then eval "$PHONE_BOOT_HEALTH_CMD"; return; fi
+    ip route show default | grep -q . || return 1
+    systemctl is-active --quiet k3s-agent || return 1
+    curl -sf -m 5 http://127.0.0.1:10248/healthz >/dev/null 2>&1 || return 1
+    return 0
+}
+
+start=$(date +%s)
+until healthy; do
+    if [ $(( $(date +%s) - start )) -ge "$deadline" ]; then
+        if [ "$running" = "${launched:-}" ]; then
+            log "$running (launched by the loader) not healthy after ${deadline}s; rebooting so the loader retries or falls back"
+            ${PHONE_BOOT_REBOOT_CMD:-systemctl reboot}
+            exit 0
+        fi
+        log "$running not healthy after ${deadline}s, but the loader did not launch it; leaving it be"
+        exit 1
+    fi
+    sleep "${PHONE_BOOT_HEALTH_INTERVAL:-15}"
+done
+
+if [ "$running" != "${launched:-}" ]; then
+    log "$running is healthy; it was not launched by the loader (state: good=${good:-} trial=${trial:-} launched=${launched:-})"
+    exit 0
+fi
+if [ "$running" = "$trial" ]; then
+    good=$running trial= tries=0 strikes=0 launched=
+    save
+    log "blessed $running as good"
+else
+    strikes=0 launched=
+    save
+    log "$running is healthy; launch blessed"
+fi

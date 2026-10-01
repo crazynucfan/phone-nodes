@@ -1,0 +1,111 @@
+From 8382fca4ff2662c3a5a2149822b3fd860761c74b Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 00:46:24 +0100
+Subject: [PATCH 01/13] phy: qcom-qmp-ufs: Add SM6375 support
+
+SM6375 has a single-lane QMP v4 UFS PHY limited to HS-G3. Its downstream
+tables ("qcom,ufs-phy-qmp-v4-yupik", rate A without G4) are SC7280's:
+the SM8150 serdes and rate B serdes, SC7280's TX (LANE_MODE_1 0x35) and
+RX tables, and SC7280's PCS table except MULTI_LANE_CTRL1, which
+downstream writes only for a second lane. The regulator loads are the
+ones downstream gives for this PHY (85.7 mA and 18.3 mA), as on
+SC8280XP.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../phy/qcom,sc8280xp-qmp-ufs-phy.yaml        |  2 +
+ drivers/phy/qualcomm/phy-qcom-qmp-ufs.c       | 44 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-ufs-phy.yaml b/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-ufs-phy.yaml
+index b2c5c9a37..30a67979d 100644
+--- a/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-ufs-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-ufs-phy.yaml
+@@ -50,6 +50,7 @@ properties:
+           - qcom,sm6115-qmp-ufs-phy
+           - qcom,sm6125-qmp-ufs-phy
+           - qcom,sm6350-qmp-ufs-phy
++          - qcom,sm6375-qmp-ufs-phy
+           - qcom,sm7150-qmp-ufs-phy
+           - qcom,sm8150-qmp-ufs-phy
+           - qcom,sm8250-qmp-ufs-phy
+@@ -119,6 +120,7 @@ allOf:
+               - qcom,sm6115-qmp-ufs-phy
+               - qcom,sm6125-qmp-ufs-phy
+               - qcom,sm6350-qmp-ufs-phy
++              - qcom,sm6375-qmp-ufs-phy
+               - qcom,sm7150-qmp-ufs-phy
+               - qcom,sm8150-qmp-ufs-phy
+               - qcom,sm8250-qmp-ufs-phy
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-ufs.c b/drivers/phy/qualcomm/phy-qcom-qmp-ufs.c
+index 0f4ad24aa..c4623bc17 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-ufs.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-ufs.c
+@@ -278,6 +278,22 @@ static const struct qmp_phy_init_tbl sc7280_ufsphy_pcs[] = {
+ 	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_RX_HSGEAR_CAPABILITY, 0x03),
+ };
+ 
++static const struct qmp_phy_init_tbl sm6375_ufsphy_pcs[] = {
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_RX_SIGDET_CTRL2, 0x6d),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TX_LARGE_AMP_DRV_LVL, 0x0a),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TX_SMALL_AMP_DRV_LVL, 0x02),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TX_MID_TERM_CTRL1, 0x43),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_DEBUG_BUS_CLKSEL, 0x1f),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_RX_MIN_HIBERN8_TIME, 0xff),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_PLL_CNTL, 0x03),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TIMER_20US_CORECLK_STEPS_MSB, 0x16),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TIMER_20US_CORECLK_STEPS_LSB, 0xd8),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TX_PWM_GEAR_BAND, 0xaa),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TX_HS_GEAR_BAND, 0x06),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_TX_HSGEAR_CAPABILITY, 0x03),
++	QMP_PHY_INIT_CFG(QPHY_V4_PCS_UFS_RX_HSGEAR_CAPABILITY, 0x03),
++};
++
+ static const struct qmp_phy_init_tbl sc7280_ufsphy_hs_g4_rx[] = {
+ 	QMP_PHY_INIT_CFG(QSERDES_V4_RX_SIGDET_LVL, 0x24),
+ 	QMP_PHY_INIT_CFG(QSERDES_V4_RX_SIGDET_CNTRL, 0x0f),
+@@ -1530,6 +1546,31 @@ static const struct qmp_phy_cfg sm6115_ufsphy_cfg = {
+ 	.no_pcs_sw_reset	= true,
+ };
+ 
++static const struct qmp_phy_cfg sm6375_ufsphy_cfg = {
++	.lanes			= 1,
++
++	.offsets		= &qmp_ufs_offsets,
++	.max_supported_gear	= UFS_HS_G3,
++
++	.tbls = {
++		.serdes		= sm8150_ufsphy_serdes,
++		.serdes_num	= ARRAY_SIZE(sm8150_ufsphy_serdes),
++		.tx		= sc7280_ufsphy_tx,
++		.tx_num		= ARRAY_SIZE(sc7280_ufsphy_tx),
++		.rx		= sc7280_ufsphy_rx,
++		.rx_num		= ARRAY_SIZE(sc7280_ufsphy_rx),
++		.pcs		= sm6375_ufsphy_pcs,
++		.pcs_num	= ARRAY_SIZE(sm6375_ufsphy_pcs),
++	},
++	.tbls_hs_b = {
++		.serdes		= sm8150_ufsphy_hs_b_serdes,
++		.serdes_num	= ARRAY_SIZE(sm8150_ufsphy_hs_b_serdes),
++	},
++	.vreg_list		= sc8280xp_ufsphy_vreg_l,
++	.num_vregs		= ARRAY_SIZE(sc8280xp_ufsphy_vreg_l),
++	.regs			= ufsphy_v4_regs_layout,
++};
++
+ static const struct qmp_phy_cfg sm7150_ufsphy_cfg = {
+ 	.lanes			= 1,
+ 
+@@ -2294,6 +2335,9 @@ static const struct of_device_id qmp_ufs_of_match_table[] = {
+ 	}, {
+ 		.compatible = "qcom,sm6350-qmp-ufs-phy",
+ 		.data = &sdm845_ufsphy_cfg,
++	}, {
++		.compatible = "qcom,sm6375-qmp-ufs-phy",
++		.data = &sm6375_ufsphy_cfg,
+ 	}, {
+ 		.compatible = "qcom,sm7150-qmp-ufs-phy",
+ 		.data = &sm7150_ufsphy_cfg,
+-- 
+2.43.0
+

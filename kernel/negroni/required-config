@@ -1,0 +1,30 @@
+#! Config the phone's boot path depends on (checked by scripts/check-artifacts.sh
+#! against the built .config). kexec from /boot with the vendor slot as the way
+#! back needs the kexec syscalls and the GICv3 ITS driver (it reuses the LPI
+#! tables the previous kernel leaves enabled); storage and Wi-Fi need their PHY
+#! and host drivers, as modules or built in; the USB serial gadget is the
+#! diagnostic channel when nothing else comes up. Module versioning stays off:
+#! each build's release string is unique instead (BUILD_ID). A hung kernel
+#! only gets back to the loader by panicking (nothing else resets the phone),
+#! so the lockup detectors must panic and a panic must reboot. Cilium needs
+#! kernel BTF (BPF masquerade; socket-LB from 1.19.8 and 1.20.2 on).
+CONFIG_LOCALVERSION="-negroni"
+CONFIG_KEXEC=y
+CONFIG_KEXEC_FILE=y
+CONFIG_ARM_GIC_V3_ITS=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PHY_QCOM_QMP_UFS=m|y
+CONFIG_PCIE_QCOM=y
+CONFIG_PHY_QCOM_QMP_PCIE=m|y
+CONFIG_ATH11K_PCI=m|y
+CONFIG_USB_CONFIGFS_ACM=y
+# CONFIG_MODVERSIONS is not set
+CONFIG_QCOM_WDT=y
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_PANIC_ON_OOPS=y
+CONFIG_PANIC_TIMEOUT=10
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=1
+CONFIG_HARDLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
+CONFIG_DEBUG_INFO_BTF=y

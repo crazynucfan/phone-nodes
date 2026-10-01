@@ -1,0 +1,127 @@
+From d6ce804e8e818233d25167c01cad932b305c4d85 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 01:06:40 +0100
+Subject: [PATCH 05/13] power: supply: bq256xx: Add SG Micro SGM41542
+
+The SGM41542 is a BQ25601-compatible charger. Its input current and
+voltage limits, charge current and voltage, pre-charge and termination
+currents, watchdog, status and fault fields have the BQ25601 layout and
+steps (as in Motorola's downstream sgm4154x driver). Its part number
+field (REG0B[6:3]) reads 0b1101, which this driver does not check, and
+its extra features (JEITA, input detection, VREG fine tuning) in
+registers 0x0c-0x0f are not used.
+
+The register cache starts from the BQ2560x power-on defaults, which
+still have to be compared with this chip's on hardware.
+
+The Motorola moto g82 5G charges its battery with one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../bindings/power/supply/bq256xx.yaml        |  2 ++
+ drivers/power/supply/Kconfig                  |  1 +
+ drivers/power/supply/bq256xx_charger.c        | 35 +++++++++++++++++++
+ 3 files changed, 38 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/power/supply/bq256xx.yaml b/Documentation/devicetree/bindings/power/supply/bq256xx.yaml
+index 8cee37b98..f797a66b9 100644
+--- a/Documentation/devicetree/bindings/power/supply/bq256xx.yaml
++++ b/Documentation/devicetree/bindings/power/supply/bq256xx.yaml
+@@ -34,6 +34,7 @@ properties:
+       - ti,bq25611d
+       - ti,bq25618
+       - ti,bq25619
++      - sgmicro,sgm41542
+ 
+   reg:
+     maxItems: 1
+@@ -86,6 +87,7 @@ allOf:
+               - ti,bq25601
+               - ti,bq25600d
+               - ti,bq25601d
++              - sgmicro,sgm41542
+     then:
+       properties:
+         ti,no-thermistor: false
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index f0ede1cec..ece846064 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -849,6 +849,7 @@ config CHARGER_BQ256XX
+ 	  BQ256XX family of devices are highly-integrated, switch-mode battery
+ 	  charge management and system power path management devices for single
+ 	  cell Li-ion and Li-polymer batteries.
++	  The SG Micro SGM41542 is also supported.
+ 
+ config CHARGER_RK817
+ 	tristate "Rockchip RK817 PMIC Battery Charger"
+diff --git a/drivers/power/supply/bq256xx_charger.c b/drivers/power/supply/bq256xx_charger.c
+index 43e1da849..945b85c2f 100644
+--- a/drivers/power/supply/bq256xx_charger.c
++++ b/drivers/power/supply/bq256xx_charger.c
+@@ -202,6 +202,7 @@ enum bq256xx_id {
+ 	BQ25618,
+ 	BQ25619,
+ 	BQ25611D,
++	SGM41542,
+ };
+ 
+ /**
+@@ -1535,6 +1536,38 @@ static const struct bq256xx_chip_info bq256xx_chip_info_tbl[] = {
+ 
+ 		.has_usb_detect = false,
+ 	},
++
++	[SGM41542] = {
++		.model_id = SGM41542,
++		.bq256xx_regmap_config = &bq25600_regmap_config,
++		.bq256xx_get_ichg = bq256xx_get_ichg_curr,
++		.bq256xx_get_iindpm = bq256xx_get_input_curr_lim,
++		.bq256xx_get_vbatreg = bq2560x_get_chrg_volt,
++		.bq256xx_get_iterm = bq256xx_get_term_curr,
++		.bq256xx_get_iprechg = bq256xx_get_prechrg_curr,
++		.bq256xx_get_vindpm = bq256xx_get_input_volt_lim,
++
++		.bq256xx_set_ichg = bq256xx_set_ichg_curr,
++		.bq256xx_set_iindpm = bq256xx_set_input_curr_lim,
++		.bq256xx_set_vbatreg = bq2560x_set_chrg_volt,
++		.bq256xx_set_iterm = bq256xx_set_term_curr,
++		.bq256xx_set_iprechg = bq256xx_set_prechrg_curr,
++		.bq256xx_set_vindpm = bq256xx_set_input_volt_lim,
++		.bq256xx_set_charge_type = bq256xx_set_charge_type,
++		.bq256xx_set_ts_ignore = NULL,
++
++		.bq256xx_def_ichg = BQ2560X_ICHG_DEF_uA,
++		.bq256xx_def_iindpm = BQ256XX_IINDPM_DEF_uA,
++		.bq256xx_def_vbatreg = BQ2560X_VBATREG_DEF_uV,
++		.bq256xx_def_iterm = BQ256XX_ITERM_DEF_uA,
++		.bq256xx_def_iprechg = BQ256XX_IPRECHG_DEF_uA,
++		.bq256xx_def_vindpm = BQ256XX_VINDPM_DEF_uV,
++
++		.bq256xx_max_ichg = BQ256XX_ICHG_MAX_uA,
++		.bq256xx_max_vbatreg = BQ2560X_VBATREG_MAX_uV,
++
++		.has_usb_detect = false,
++	},
+ };
+ 
+ static int bq256xx_power_supply_init(struct bq256xx_device *bq,
+@@ -1776,6 +1809,7 @@ static const struct i2c_device_id bq256xx_i2c_ids[] = {
+ 	{ .name = "bq25611d", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25611D] },
+ 	{ .name = "bq25618", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25618] },
+ 	{ .name = "bq25619", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[BQ25619] },
++	{ .name = "sgm41542", .driver_data = (kernel_ulong_t)&bq256xx_chip_info_tbl[SGM41542] },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(i2c, bq256xx_i2c_ids);
+@@ -1788,6 +1822,7 @@ static const struct of_device_id bq256xx_of_match[] = {
+ 	{ .compatible = "ti,bq25611d", .data = &bq256xx_chip_info_tbl[BQ25611D] },
+ 	{ .compatible = "ti,bq25618", .data = &bq256xx_chip_info_tbl[BQ25618] },
+ 	{ .compatible = "ti,bq25619", .data = &bq256xx_chip_info_tbl[BQ25619] },
++	{ .compatible = "sgmicro,sgm41542", .data = &bq256xx_chip_info_tbl[SGM41542] },
+ 	{}
+ };
+ MODULE_DEVICE_TABLE(of, bq256xx_of_match);
+-- 
+2.43.0
+

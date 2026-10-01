@@ -1,0 +1,49 @@
+From 43e0b1e068d7b7fd7dcb325467f983ccb8390d8b Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 01:56:44 +0100
+Subject: [PATCH 07/13] arm64: dts: qcom: sm6375: Add the APSS watchdog
+
+The APSS watchdog sits at 0xf410000 with its bark interrupt on SPI 0,
+as in the downstream device tree. Describing it lets qcom_wdt take over
+a watchdog the bootloader left running instead of letting it reset the
+system.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Documentation/devicetree/bindings/watchdog/qcom-wdt.yaml | 1 +
+ arch/arm64/boot/dts/qcom/sm6375.dtsi                     | 7 +++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/watchdog/qcom-wdt.yaml b/Documentation/devicetree/bindings/watchdog/qcom-wdt.yaml
+index 74117f572..d8e0a7238 100644
+--- a/Documentation/devicetree/bindings/watchdog/qcom-wdt.yaml
++++ b/Documentation/devicetree/bindings/watchdog/qcom-wdt.yaml
+@@ -47,6 +47,7 @@ properties:
+               - qcom,apss-wdt-shikra
+               - qcom,apss-wdt-sm6115
+               - qcom,apss-wdt-sm6350
++              - qcom,apss-wdt-sm6375
+               - qcom,apss-wdt-sm8150
+               - qcom,apss-wdt-sm8250
+               - qcom,apss-wdt-x1e80100
+diff --git a/arch/arm64/boot/dts/qcom/sm6375.dtsi b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+index 07eacee07..19f0196ee 100644
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -1826,6 +1826,13 @@ intc: interrupt-controller@f200000 {
+ 			interrupt-controller;
+ 		};
+ 
++		watchdog@f410000 {
++			compatible = "qcom,apss-wdt-sm6375", "qcom,kpss-wdt";
++			reg = <0x0 0x0f410000 0x0 0x1000>;
++			clocks = <&sleep_clk>;
++			interrupts = <GIC_SPI 0 IRQ_TYPE_EDGE_RISING>;
++		};
++
+ 		timer@f420000 {
+ 			compatible = "arm,armv7-timer-mem";
+ 			reg = <0 0x0f420000 0 0x1000>;
+-- 
+2.43.0
+

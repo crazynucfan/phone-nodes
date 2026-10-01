@@ -1,0 +1,19 @@
+# /etc/default/phone-bootimg for a negroni. Read by phone-bootimg, which the
+# kernel package hook /etc/kernel/postinst.d/zz-phone-bootimg runs. Only needed
+# to write kernels into the boot partitions; the kexec loader does not use it.
+# v4-ab (A/B, header v4, DTB in vendor_boot) or v2 (non-A/B, DTB in boot).
+LAYOUT=v4-ab
+CMDLINE="console=tty0 consoleblank=120 root=/dev/sda14 rootwait rw bootconfig"
+# Relative to /usr/lib/linux-image-<release>/ (where the kernel package puts DTBs).
+DTB=qcom/sm8450-oneplus-negroni.dtb
+# Kernel releases of this device's builds look like <version>-negroni-<build>.
+FLAVOUR=negroni
+# A/B slot whose boot partitions are written (v4-ab only); the script refuses
+# if the phone is running from another slot.
+SLOT=b
+STATE_DIR=/var/lib/phone-bootimg
+# Android version and security patch level of the stock firmware; the
+# bootloader compares them with what it booted before.
+OS_VERSION=12.0.0
+OS_PATCH_LEVEL=2026-03-00
+KEEP_BACKUPS=2

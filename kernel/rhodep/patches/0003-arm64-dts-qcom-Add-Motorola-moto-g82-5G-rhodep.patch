@@ -1,0 +1,517 @@
+From 2aa7adb25e031685fde83cb1df1643d1898c99b8 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 00:56:31 +0100
+Subject: [PATCH 03/13] arm64: dts: qcom: Add Motorola moto g82 5G (rhodep)
+
+The moto g82 5G (XT2225) is an SM6375 phone with the same PMICs as the
+Sony Xperia 10 IV (PM6125, PMK8350 on SID 6, PMR735A). This is the
+device tree for running it as a headless node: UFS, the microSD slot,
+the USB port (peripheral for bring-up), Wi-Fi with the modem DSP that
+runs its firmware, keys, RTC and ramoops.
+
+Supplies, pins and memory come from the device tree the stock
+bootloader passes to the vendor kernel: the UFS, SD, USB PHY and Wi-Fi
+rails match pdx225's apart from the UFS VCC range and the absent second
+3.3 V Wi-Fi chain. Volume up is PMR735A GPIO 1 and RESIN is volume
+down. GPIOs 13-16 carry the fingerprint sensor's SPI and belong to
+TrustZone. The firmware-owned reserved regions are identical to the
+ones sm6375.dtsi describes; ramoops goes where the stock kernel keeps
+it. qcom,msm-id and qcom,board-id are the stock vendor_boot DTB's,
+which the bootloader matches on, so SM6375 joins the SoCs allowed to
+carry them.
+
+The charger (SGM41542), Type-C CC logic (SGM7220) and fuel gauge
+(CW2217) sit on I2C8 and have no upstream drivers yet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../devicetree/bindings/arm/qcom.yaml         |   2 +
+ arch/arm64/boot/dts/qcom/Makefile             |   3 +
+ .../boot/dts/qcom/sm6375-motorola-rhodep.dts  | 441 ++++++++++++++++++
+ 3 files changed, 446 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+
+diff --git a/Documentation/devicetree/bindings/arm/qcom.yaml b/Documentation/devicetree/bindings/arm/qcom.yaml
+index 50cc18a6e..a2ca4ed5d 100644
+--- a/Documentation/devicetree/bindings/arm/qcom.yaml
++++ b/Documentation/devicetree/bindings/arm/qcom.yaml
+@@ -1031,6 +1031,7 @@ properties:
+ 
+       - items:
+           - enum:
++              - motorola,rhodep
+               - sony,pdx225
+           - const: qcom,sm6375
+ 
+@@ -1304,6 +1305,7 @@ allOf:
+               - qcom,sm6115
+               - qcom,sm6125
+               - qcom,sm6350
++              - qcom,sm6375
+               - qcom,sm7125
+               - qcom,sm7225
+               - qcom,sm8150
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index 6f33c4e2f..e55bdc6eb 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -343,6 +343,9 @@ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-ginkgo.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-laurel-sprout.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-willow.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6350-sony-xperia-lena-pdx213.dtb
++dtb-$(CONFIG_ARCH_QCOM)	+= sm6375-motorola-rhodep.dtb
++# The bootloader applies an overlay from dtbo, which needs the base DTB's symbols
++DTC_FLAGS_sm6375-motorola-rhodep := -@
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm6375-sony-xperia-murray-pdx225.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm7125-xiaomi-curtana.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm7125-xiaomi-joyeuse.dtb
+diff --git a/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+new file mode 100644
+index 000000000..4271d11e9
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm6375-motorola-rhodep.dts
+@@ -0,0 +1,441 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * Motorola moto g82 5G (rhodep, XT2225), used as a headless node.
++ *
++ * Supplies, pins and memory come from the stock device tree the bootloader
++ * hands the vendor kernel (blair-moto-rhodep with the board's overlay). The
++ * PMICs and most rails match the Sony Xperia 10 IV.
++ */
++
++/dts-v1/;
++
++/* PMK8350 is configured to use SID6 instead of 0 */
++#define PMK8350_SID 6
++
++#include <dt-bindings/arm/qcom,ids.h>
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include "sm6375.dtsi"
++#include "pm6125.dtsi"
++#include "pmk8350.dtsi"
++#include "pmr735a.dtsi"
++
++/* PM6125 PON is used and we can't have duplicate labels */
++/delete-node/ &pmk8350_pon;
++
++/ {
++	model = "Motorola moto g82 5G";
++	compatible = "motorola,rhodep", "qcom,sm6375";
++	chassis-type = "handset";
++
++	/* The bootloader picks the DTB by these, as in the stock vendor_boot */
++	qcom,msm-id = <QCOM_ID_SM6375 0x10000>;
++	qcom,board-id = <0 0>;
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		/*
++		 * The splash framebuffer. The panel (NT37701) is a command-mode
++		 * DSI panel, so this only shows anything if the bootloader
++		 * leaves the display refreshing on its own.
++		 */
++		framebuffer: framebuffer@85200000 {
++			compatible = "simple-framebuffer";
++			reg = <0 0x85200000 0 0xc00000>;
++
++			width = <1080>;
++			height = <2400>;
++			stride = <(1080 * 4)>;
++			format = "a8r8g8b8";
++			clocks = <&gcc GCC_DISP_AHB_CLK>,
++				 <&gcc GCC_DISP_HF_AXI_CLK>,
++				 <&gcc GCC_DISP_THROTTLE_CORE_CLK>,
++				 <&gcc GCC_DISP_GPLL0_DIV_CLK_SRC>;
++		};
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++		label = "gpio-keys";
++
++		pinctrl-0 = <&vol_up_n>;
++		pinctrl-names = "default";
++
++		key-volume-up {
++			label = "Volume Up";
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&pmr735a_gpios 1 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++			linux,can-disable;
++			wakeup-source;
++		};
++	};
++
++	reserved-memory {
++		cont_splash_mem: memory@85200000 {
++			reg = <0 0x85200000 0 0xc00000>;
++			no-map;
++		};
++
++		/*
++		 * The stock kernel's region and layout, so the bootloader leaves
++		 * it be and either kernel can read what the other left there.
++		 */
++		ramoops@af000000 {
++			compatible = "ramoops";
++			reg = <0 0xaf000000 0 0xbf800>;
++			record-size = <0x3f800>;
++			console-size = <0x40000>;
++			pmsg-size = <0x40000>;
++		};
++	};
++
++	vph_pwr: vph-pwr-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vph_pwr";
++		regulator-min-microvolt = <3700000>;
++		regulator-max-microvolt = <3700000>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++};
++
++&gpi_dma0 {
++	status = "okay";
++};
++
++&gpi_dma1 {
++	status = "okay";
++};
++
++&i2c8 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	/*
++	 * Charger (SGM41542, 0x3b), Type-C CC logic (SGM7220, 0x47) and
++	 * fuel gauge (CW2217, 0x64).
++	 */
++};
++
++&pmk8350_adc_tm {
++	status = "okay";
++};
++
++&pmk8350_rtc {
++	status = "okay";
++};
++
++&pmr735a_gpios {
++	vol_up_n: vol-up-n-state {
++		pins = "gpio1";
++		function = "normal";
++		power-source = <1>;
++		bias-pull-up;
++		input-enable;
++	};
++};
++
++&pon_pwrkey {
++	status = "okay";
++};
++
++&pon_resin {
++	linux,code = <KEY_VOLUMEDOWN>;
++	status = "okay";
++};
++
++&qupv3_id_0 {
++	status = "okay";
++};
++
++&qupv3_id_1 {
++	status = "okay";
++};
++
++/*
++ * The WCN3990 Wi-Fi firmware runs on the modem DSP. The blobs come from the
++ * phone's own modem partition at runtime (msm-firmware-loader), hence the
++ * bare names.
++ */
++&remoteproc_mss {
++	firmware-name = "modem.mbn";
++	status = "okay";
++};
++
++&rpm_requests {
++	regulators-0 {
++		compatible = "qcom,rpm-pm6125-regulators";
++
++		pm6125_s5: s5 {
++			regulator-min-microvolt = <382000>;
++			regulator-max-microvolt = <1120000>;
++		};
++
++		pm6125_s6: s6 {
++			regulator-min-microvolt = <320000>;
++			regulator-max-microvolt = <1374000>;
++		};
++
++		pm6125_s7: s7 {
++			regulator-min-microvolt = <1574000>;
++			regulator-max-microvolt = <2040000>;
++		};
++
++		/*
++		 * S8 is VDD_GFX
++		 * L1 is VDD_LPI_CX
++		 */
++
++		pm6125_l2: l2 {
++			regulator-min-microvolt = <1170000>;
++			regulator-max-microvolt = <1304000>;
++		};
++
++		pm6125_l3: l3 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1300000>;
++		};
++
++		pm6125_l4: l4 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1300000>;
++		};
++
++		pm6125_l5: l5 {
++			regulator-min-microvolt = <1650000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-allow-set-load;
++		};
++
++		pm6125_l6: l6 {
++			regulator-min-microvolt = <1080000>;
++			regulator-max-microvolt = <1304000>;
++		};
++
++		pm6125_l7: l7 {
++			regulator-min-microvolt = <880000>;
++			regulator-max-microvolt = <880000>;
++		};
++
++		pm6125_l8: l8 {
++			regulator-min-microvolt = <1100000>;
++			regulator-max-microvolt = <1304000>;
++		};
++
++		pm6125_l9: l9 {
++			regulator-min-microvolt = <1504000>;
++			regulator-max-microvolt = <2000000>;
++		};
++
++		pm6125_l10: l10 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		pm6125_l11: l11 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-allow-set-load;
++		};
++
++		pm6125_l12: l12 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <2000000>;
++		};
++
++		pm6125_l13: l13 {
++			regulator-min-microvolt = <1650000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		pm6125_l14: l14 {
++			regulator-min-microvolt = <1700000>;
++			regulator-max-microvolt = <1900000>;
++		};
++
++		pm6125_l15: l15 {
++			regulator-min-microvolt = <1650000>;
++			regulator-max-microvolt = <3544000>;
++		};
++
++		pm6125_l16: l16 {
++			regulator-min-microvolt = <1620000>;
++			regulator-max-microvolt = <1980000>;
++		};
++
++		/* L17 is VDD_LPI_MX */
++
++		pm6125_l18: l18 {
++			regulator-min-microvolt = <830000>;
++			regulator-max-microvolt = <920000>;
++		};
++
++		pm6125_l19: l19 {
++			regulator-min-microvolt = <1624000>;
++			regulator-max-microvolt = <3304000>;
++		};
++
++		pm6125_l20: l20 {
++			regulator-min-microvolt = <1624000>;
++			regulator-max-microvolt = <3304000>;
++		};
++
++		pm6125_l21: l21 {
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++		};
++
++		pm6125_l22: l22 {
++			regulator-min-microvolt = <2704000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-allow-set-load;
++		};
++
++		pm6125_l23: l23 {
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++		};
++
++		pm6125_l24: l24 {
++			regulator-min-microvolt = <2950000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-allow-set-load;
++		};
++	};
++
++	regulators-1 {
++		compatible = "qcom,rpm-pmr735a-regulators";
++
++		/*
++		 * S1 is VDD_MX
++		 * S2 is VDD_CX
++		 */
++
++		pmr735a_l1: l1 {
++			regulator-min-microvolt = <570000>;
++			regulator-max-microvolt = <650000>;
++		};
++
++		pmr735a_l2: l2 {
++			regulator-min-microvolt = <640000>;
++			regulator-max-microvolt = <640000>;
++		};
++
++		pmr735a_l3: l3 {
++			regulator-min-microvolt = <1000000>;
++			regulator-max-microvolt = <1200000>;
++		};
++
++		pmr735a_l4: l4 {
++			regulator-min-microvolt = <1504000>;
++			regulator-max-microvolt = <2000000>;
++		};
++
++		pmr735a_l5: l5 {
++			regulator-min-microvolt = <751000>;
++			regulator-max-microvolt = <824000>;
++		};
++
++		pmr735a_l6: l6 {
++			regulator-min-microvolt = <504000>;
++			regulator-max-microvolt = <868000>;
++		};
++
++		pmr735a_l7: l7 {
++			regulator-min-microvolt = <2700000>;
++			regulator-max-microvolt = <3544000>;
++		};
++	};
++};
++
++&sdc2_off_state {
++	sd-cd-pins {
++		pins = "gpio94";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++};
++
++&sdc2_on_state {
++	sd-cd-pins {
++		pins = "gpio94";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++};
++
++&sdhc_2 {
++	vmmc-supply = <&pm6125_l22>;
++	vqmmc-supply = <&pm6125_l5>;
++
++	cd-gpios = <&tlmm 94 GPIO_ACTIVE_HIGH>;
++
++	status = "okay";
++};
++
++&tlmm {
++	/* Fingerprint sensor SPI, owned by TrustZone */
++	gpio-reserved-ranges = <13 4>;
++};
++
++&ufs_mem_hc {
++	reset-gpios = <&tlmm 156 GPIO_ACTIVE_LOW>;
++
++	vcc-supply = <&pm6125_l24>;
++	vcc-max-microamp = <800000>;
++	vccq2-supply = <&pm6125_l11>;
++	vccq2-max-microamp = <800000>;
++
++	status = "okay";
++};
++
++&ufs_mem_phy {
++	vdda-phy-supply = <&pm6125_l7>;
++	vdda-pll-supply = <&pm6125_l4>;
++
++	status = "okay";
++};
++
++&usb_1 {
++	status = "okay";
++};
++
++/*
++ * A peripheral by default: a USB gadget (serial and network) to the PC is
++ * the way in before anything else works. The node runs the port as a host
++ * for its Ethernet adapter. There is no driver for the Type-C logic
++ * (SGM7220), so userspace picks the role through the role switch.
++ */
++&usb_1_dwc3 {
++	dr_mode = "otg";
++	usb-role-switch;
++	role-switch-default-mode = "peripheral";
++};
++
++&usb_1_hsphy {
++	vdda-pll-supply = <&pm6125_l7>;
++	vdda18-supply = <&pm6125_l10>;
++	vdda33-supply = <&pmr735a_l7>;
++
++	status = "okay";
++};
++
++/* No second 3.3 V chain on this board */
++&wifi {
++	vdd-0.8-cx-mx-supply = <&pmr735a_l2>;
++	vdd-1.8-xo-supply = <&pm6125_l16>;
++	vdd-1.3-rfa-supply = <&pm6125_l2>;
++	vdd-3.3-ch0-supply = <&pm6125_l23>;
++
++	status = "okay";
++};
++
++&xo_board_clk {
++	clock-frequency = <19200000>;
++};
+-- 
+2.43.0
+

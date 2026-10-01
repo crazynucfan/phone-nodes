@@ -1,0 +1,112 @@
+From d274bf8adff676deb650a874934e478c7edb394d Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 23:18:07 +0100
+Subject: [PATCH 2/6] TEMPORARY: Revert "bpf: Add validation for bpf_set_retval
+ argument"
+
+This reverts upstream b1f7f67b74c2. Cilium 1.20.1 probes bpf_set_retval
+with a non-scalar argument and fails to start on kernels carrying that
+validation. Cilium 1.18.14 and 1.19.8 have the fix; no 1.20 release does
+yet. Drop this commit as soon as the cluster runs a Cilium release with
+the fix: it removes a security check (positive cgroup BPF return values
+can lead to NULL pointer dereferences), although only privileged users
+can load BPF on negroni (kernel.unprivileged_bpf_disabled=1).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/bpf/verifier.c | 55 -------------------------------------------
+ 1 file changed, 55 deletions(-)
+
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 41b49c56e..0e749c651 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -10457,9 +10457,7 @@ static int do_refine_retval_range(struct bpf_verifier_env *env,
+ 				  int func_id,
+ 				  struct bpf_call_arg_meta *meta)
+ {
+-	struct bpf_retval_range range;
+ 	struct bpf_reg_state *ret_reg = &regs[BPF_REG_0];
+-	enum bpf_prog_type prog_type = resolve_prog_type(env->prog);
+ 
+ 	if (ret_type != RET_INTEGER)
+ 		return 0;
+@@ -10479,29 +10477,6 @@ static int do_refine_retval_range(struct bpf_verifier_env *env,
+ 		reg_set_urange32(ret_reg, 0, nr_cpu_ids - 1);
+ 		reg_bounds_sync(ret_reg);
+ 		break;
+-	case BPF_FUNC_get_retval:
+-		/*
+-		 * bpf_get_retval may see arbitrary value passed by bpf_prog_run_array_cg for
+-		 * CGROUP_GETSOCKOPT type.
+-		 */
+-		if (prog_type == BPF_PROG_TYPE_CGROUP_SOCKOPT &&
+-		    env->prog->expected_attach_type == BPF_CGROUP_GETSOCKOPT)
+-			break;
+-
+-		if (prog_type == BPF_PROG_TYPE_LSM &&
+-		    env->prog->expected_attach_type == BPF_LSM_CGROUP) {
+-			if (!env->prog->aux->attach_func_proto->type)
+-				break;
+-			bpf_lsm_get_retval_range(env->prog, &range);
+-		} else {
+-			range.minval = -MAX_ERRNO;
+-			range.maxval = 0;
+-		}
+-
+-		reg_set_srange64(ret_reg, range.minval, range.maxval);
+-		reg_set_srange32(ret_reg, range.minval, range.maxval);
+-		reg_bounds_sync(ret_reg);
+-		break;
+ 	}
+ 
+ 	return reg_bounds_sanity_check(env, ret_reg, "retval");
+@@ -11017,24 +10992,6 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
+ 		}
+ 		break;
+ 	case BPF_FUNC_set_retval:
+-	{
+-		struct bpf_retval_range range = {
+-			.minval = -MAX_ERRNO,
+-			.maxval = 0,
+-			.return_32bit = true
+-		};
+-		struct bpf_reg_state *r1 = &regs[BPF_REG_1];
+-
+-		if (r1->type != SCALAR_VALUE) {
+-			verbose(env, "R1 is not a scalar\n");
+-			return -EINVAL;
+-		}
+-
+-		/* CGROUP_GETSOCKOPT is allowed to return arbitrary value */
+-		if (prog_type == BPF_PROG_TYPE_CGROUP_SOCKOPT &&
+-		    env->prog->expected_attach_type == BPF_CGROUP_GETSOCKOPT)
+-			break;
+-
+ 		if (prog_type == BPF_PROG_TYPE_LSM &&
+ 		    env->prog->expected_attach_type == BPF_LSM_CGROUP) {
+ 			if (!env->prog->aux->attach_func_proto->type) {
+@@ -11044,20 +11001,8 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
+ 				verbose(env, "BPF_LSM_CGROUP that attach to void LSM hooks can't modify return value!\n");
+ 				return -EINVAL;
+ 			}
+-			bpf_lsm_get_retval_range(env->prog, &range);
+ 		}
+-
+-		err = mark_chain_precision(env, BPF_REG_1);
+-		if (err)
+-			return err;
+-
+-		if (!retval_range_within(range, r1)) {
+-			verbose_invalid_scalar(env, r1, range, "At bpf_set_retval", "R1");
+-			return -EINVAL;
+-		}
+-
+ 		break;
+-	}
+ 	case BPF_FUNC_dynptr_write:
+ 	{
+ 		enum bpf_dynptr_type dynptr_type = meta.dynptr.type;
+-- 
+2.43.0
+

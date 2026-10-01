@@ -1,0 +1,14 @@
+[Unit]
+Description=Bless a healthy kexec'd trial kernel, or reboot to let the loader retry
+Documentation=file:/usr/local/sbin/phone-kexec-bless
+After=network-online.target k3s-agent.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/phone-kexec-bless
+# The health deadline (10 min) plus margin.
+TimeoutStartSec=720
+
+[Install]
+WantedBy=multi-user.target

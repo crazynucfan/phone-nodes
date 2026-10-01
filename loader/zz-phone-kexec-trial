@@ -1,0 +1,38 @@
+#!/bin/sh
+# Kernel postinst hook (/etc/kernel/postinst.d): a newly installed kernel
+# package becomes the kexec loader's trial. Arguments: <release> [<image>].
+# Nothing is written to the boot partitions; the loader tries the kernel on
+# the next boot and bless promotes it if the node comes up healthy.
+set -e
+rel=${1:?kernel release}
+state=${PHONE_BOOT_STATE:-/var/lib/phone-boot/state}
+# Only this device's own builds (<version>-<FLAVOUR>-<build>): a distribution
+# kernel that apt pulls in (a Recommends, say) cannot boot the phone.
+FLAVOUR=
+# shellcheck source=/dev/null
+[ -f "${PHONE_BOOT_CONF:-/etc/default/phone-kexec}" ] && . "${PHONE_BOOT_CONF:-/etc/default/phone-kexec}"
+# FLAVOUR may list several names (a device's builds changing name).
+if [ -n "$FLAVOUR" ]; then
+    ours=
+    for f in $FLAVOUR; do
+        case "$rel" in *-"$f"-*) ours=1 ;; esac
+    done
+    if [ -z "$ours" ]; then
+        echo "phone-kexec-trial: $rel is not a $FLAVOUR phone kernel; leaving the loader alone"
+        exit 0
+    fi
+fi
+mkdir -p "$(dirname "$state")"
+good= trial= tries=0 launched= strikes=0
+[ -f "$state" ] && . "$state"
+# After reading the state, which carries the previous trial's count.
+tries=${PHONE_BOOT_TRIES:-2}
+if [ "$rel" = "$good" ]; then
+    echo "phone-kexec-trial: $rel is already the good kernel"
+    exit 0
+fi
+printf 'good=%s\ntrial=%s\ntries=%s\nlaunched=%s\nstrikes=%s\n' \
+    "${good:-}" "$rel" "$tries" "${launched:-}" "${strikes:-0}" > "$state.tmp"
+mv "$state.tmp" "$state"
+sync
+echo "phone-kexec-trial: $rel is the trial kernel ($tries tries); reboot to try it"

@@ -1,0 +1,382 @@
+From c5cb7ab564fd6c64fe0cdb66b906f0d82c0cc547 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 00:40:17 +0000
+Subject: [PATCH 14/16] rpmsg: qcom_glink: Take over the RPM channel after a
+ kexec
+
+After a kexec the RPM glink link is still up. The RPM keeps the
+rpm_requests channel open under the local channel id the previous
+kernel gave it, and it neither answers a new version handshake nor
+announces the channel again. The new kernel then never gets an
+rpm_requests device, and every RPM clock, power domain and regulator
+consumer defers forever.
+
+When the FIFO indices show that a previous kernel used the link, skip
+the version handshake and register rpm_requests as already open, with
+local id 1 (the first id qcom_glink hands out, which a kernel that took
+the channel over keeps). The RPM's id for it is learnt from the first
+data it sends (2 on SM6375). qcom_glink_rpm.handover= forces the choice
+(-1 auto, 0 no, 1 yes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/rpmsg/qcom_glink_native.c | 164 ++++++++++++++++++++++++++++--
+ drivers/rpmsg/qcom_glink_native.h |   7 ++
+ drivers/rpmsg/qcom_glink_rpm.c    |  49 +++++++--
+ 3 files changed, 203 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/rpmsg/qcom_glink_native.c b/drivers/rpmsg/qcom_glink_native.c
+index fda1ddda0..74746fb0b 100644
+--- a/drivers/rpmsg/qcom_glink_native.c
++++ b/drivers/rpmsg/qcom_glink_native.c
+@@ -101,6 +101,8 @@ struct glink_core_rx_intent {
+  * @tx_avail_notify: Waitqueue for pending tx tasks
+  * @sent_read_notify: flag to check cmd sent or not
+  * @abort_tx:	flag indicating that all tx attempts should fail
++ * @handover:	channel taken over from a previous kernel whose remote id
++ *		is not known yet
+  */
+ struct qcom_glink {
+ 	struct device *dev;
+@@ -126,6 +128,8 @@ struct qcom_glink {
+ 	bool sent_read_notify;
+ 
+ 	bool abort_tx;
++
++	struct glink_channel *handover;
+ };
+ 
+ enum {
+@@ -159,6 +163,7 @@ enum {
+  * @intent_req_result: Result of intent request
+  * @intent_received: flag indicating that an intent has been received
+  * @intent_req_wq: wait queue for intent_req signalling
++ * @handed_over: opened by a previous kernel (kexec), no open handshake
+  */
+ struct glink_channel {
+ 	struct rpmsg_endpoint ept;
+@@ -191,6 +196,8 @@ struct glink_channel {
+ 	int intent_req_result;
+ 	bool intent_received;
+ 	wait_queue_head_t intent_req_wq;
++
++	bool handed_over;
+ };
+ 
+ #define to_glink_channel(_ept) container_of(_ept, struct glink_channel, ept)
+@@ -895,6 +902,34 @@ static int qcom_glink_rx_defer(struct qcom_glink *glink, size_t extra)
+ 	return 0;
+ }
+ 
++/*
++ * A channel taken over from a previous kernel learns the remote's id for it
++ * from the first data the remote sends on a channel we do not know.
++ */
++static struct glink_channel *qcom_glink_handover_bind(struct qcom_glink *glink,
++							unsigned int rcid)
++{
++	struct glink_channel *channel;
++	unsigned long flags;
++
++	spin_lock_irqsave(&glink->idr_lock, flags);
++	channel = glink->handover;
++	if (channel && idr_alloc(&glink->rcids, channel, rcid, rcid + 1,
++				 GFP_ATOMIC) == rcid) {
++		channel->rcid = rcid;
++		glink->handover = NULL;
++	} else {
++		channel = NULL;
++	}
++	spin_unlock_irqrestore(&glink->idr_lock, flags);
++
++	if (channel)
++		dev_info(glink->dev, "%s: remote channel id %u\n",
++			 channel->name, rcid);
++
++	return channel;
++}
++
+ static int qcom_glink_rx_data(struct qcom_glink *glink, size_t avail)
+ {
+ 	struct glink_core_rx_intent *intent;
+@@ -931,6 +966,9 @@ static int qcom_glink_rx_data(struct qcom_glink *glink, size_t avail)
+ 	channel = idr_find(&glink->rcids, rcid);
+ 	spin_unlock_irqrestore(&glink->idr_lock, flags);
+ 
++	if (!channel)
++		channel = qcom_glink_handover_bind(glink, rcid);
++
+ 	trace_qcom_glink_cmd_tx_data_rx(glink->label, channel ? channel->name : NULL,
+ 					channel ? channel->lcid : 0, rcid,
+ 					liid, chunk_size, left_size,
+@@ -1336,13 +1374,15 @@ static struct rpmsg_endpoint *qcom_glink_create_ept(struct rpmsg_device *rpdev,
+ 		if (!strcmp(channel->name, name))
+ 			break;
+ 	}
++	if (!channel && glink->handover && !strcmp(glink->handover->name, name))
++		channel = glink->handover;
+ 	spin_unlock_irqrestore(&glink->idr_lock, flags);
+ 
+ 	if (!channel) {
+ 		channel = qcom_glink_create_local(glink, name);
+ 		if (IS_ERR(channel))
+ 			return NULL;
+-	} else {
++	} else if (!channel->handed_over) {
+ 		ret = qcom_glink_create_remote(glink, channel);
+ 		if (ret)
+ 			return NULL;
+@@ -1707,6 +1747,85 @@ static int qcom_glink_rx_open(struct qcom_glink *glink, unsigned int rcid,
+ 	return ret;
+ }
+ 
++/**
++ * qcom_glink_native_handover() - take over a channel a previous kernel opened
++ * @glink:	the glink edge, from qcom_glink_native_resume()
++ * @name:	channel name
++ * @lcid:	the local channel id the previous kernel used
++ *
++ * After a kexec the remote still has the channel open under the old local id
++ * and will not announce it again. Register it as open with that id and create
++ * its rpmsg device, as an open from the remote would. The remote's id for it
++ * is learnt from the first data it sends.
++ *
++ * Return: 0 on success, negative errno otherwise.
++ */
++int qcom_glink_native_handover(struct qcom_glink *glink, const char *name,
++			       unsigned int lcid)
++{
++	struct glink_channel *channel;
++	struct rpmsg_device *rpdev;
++	unsigned long flags;
++	int ret;
++
++	channel = qcom_glink_alloc_channel(glink, name);
++	if (IS_ERR(channel))
++		return PTR_ERR(channel);
++
++	channel->handed_over = true;
++	complete_all(&channel->open_req);
++	complete_all(&channel->open_ack);
++
++	/* The lcids reference, as qcom_glink_send_open_req() takes one */
++	kref_get(&channel->refcount);
++
++	spin_lock_irqsave(&glink->idr_lock, flags);
++	ret = idr_alloc(&glink->lcids, channel, lcid, lcid + 1, GFP_ATOMIC);
++	if (ret >= 0) {
++		channel->lcid = ret;
++		glink->handover = channel;
++	}
++	spin_unlock_irqrestore(&glink->idr_lock, flags);
++	if (ret < 0)
++		goto put;
++
++	rpdev = kzalloc_obj(*rpdev);
++	if (!rpdev) {
++		ret = -ENOMEM;
++		goto remove;
++	}
++
++	rpdev->ept = &channel->ept;
++	strscpy(rpdev->id.name, name);
++	rpdev->src = RPMSG_ADDR_ANY;
++	rpdev->dst = RPMSG_ADDR_ANY;
++	rpdev->ops = &glink_device_ops;
++	rpdev->dev.of_node = qcom_glink_match_channel(glink->dev->of_node, name);
++	rpdev->dev.parent = glink->dev;
++	rpdev->dev.release = qcom_glink_rpdev_release;
++
++	ret = rpmsg_register_device(rpdev);
++	if (ret)
++		goto remove;
++
++	channel->rpdev = rpdev;
++	dev_info(glink->dev, "took over %s, local channel id %u\n", name, lcid);
++
++	return 0;
++
++remove:
++	spin_lock_irqsave(&glink->idr_lock, flags);
++	idr_remove(&glink->lcids, channel->lcid);
++	glink->handover = NULL;
++	spin_unlock_irqrestore(&glink->idr_lock, flags);
++put:
++	kref_put(&channel->refcount, qcom_glink_channel_release);
++	kref_put(&channel->refcount, qcom_glink_channel_release);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(qcom_glink_native_handover);
++
+ static void qcom_glink_rx_close(struct qcom_glink *glink, unsigned int rcid)
+ {
+ 	struct glink_channel *channel;
+@@ -1885,11 +2004,11 @@ static int qcom_glink_create_chrdev(struct qcom_glink *glink)
+ 	return rpmsg_ctrldev_register_device(rpdev);
+ }
+ 
+-struct qcom_glink *qcom_glink_native_probe(struct device *dev,
+-					   unsigned long features,
+-					   struct qcom_glink_pipe *rx,
+-					   struct qcom_glink_pipe *tx,
+-					   bool intentless)
++static struct qcom_glink *__qcom_glink_native_probe(struct device *dev,
++						    unsigned long features,
++						    struct qcom_glink_pipe *rx,
++						    struct qcom_glink_pipe *tx,
++						    bool intentless, bool resume)
+ {
+ 	int ret;
+ 	struct qcom_glink *glink;
+@@ -1925,9 +2044,12 @@ struct qcom_glink *qcom_glink_native_probe(struct device *dev,
+ 	if (ret)
+ 		dev_err(dev, "failed to add groups\n");
+ 
+-	ret = qcom_glink_send_version(glink);
+-	if (ret)
+-		return ERR_PTR(ret);
++	/* A resumed link was negotiated by the previous kernel */
++	if (!resume) {
++		ret = qcom_glink_send_version(glink);
++		if (ret)
++			return ERR_PTR(ret);
++	}
+ 
+ 	ret = qcom_glink_create_chrdev(glink);
+ 	if (ret)
+@@ -1935,8 +2057,32 @@ struct qcom_glink *qcom_glink_native_probe(struct device *dev,
+ 
+ 	return glink;
+ }
++
++struct qcom_glink *qcom_glink_native_probe(struct device *dev,
++					   unsigned long features,
++					   struct qcom_glink_pipe *rx,
++					   struct qcom_glink_pipe *tx,
++					   bool intentless)
++{
++	return __qcom_glink_native_probe(dev, features, rx, tx, intentless, false);
++}
+ EXPORT_SYMBOL_GPL(qcom_glink_native_probe);
+ 
++/*
++ * qcom_glink_native_resume() - qcom_glink_native_probe() for a link that a
++ * previous kernel (before a kexec) left up: the remote does not negotiate
++ * again, so do not start a version handshake.
++ */
++struct qcom_glink *qcom_glink_native_resume(struct device *dev,
++					    unsigned long features,
++					    struct qcom_glink_pipe *rx,
++					    struct qcom_glink_pipe *tx,
++					    bool intentless)
++{
++	return __qcom_glink_native_probe(dev, features, rx, tx, intentless, true);
++}
++EXPORT_SYMBOL_GPL(qcom_glink_native_resume);
++
+ static int qcom_glink_remove_device(struct device *dev, void *data)
+ {
+ 	device_unregister(dev);
+diff --git a/drivers/rpmsg/qcom_glink_native.h b/drivers/rpmsg/qcom_glink_native.h
+index 8dbec24de..80157181e 100644
+--- a/drivers/rpmsg/qcom_glink_native.h
++++ b/drivers/rpmsg/qcom_glink_native.h
+@@ -35,6 +35,13 @@ struct qcom_glink *qcom_glink_native_probe(struct device *dev,
+ 					   struct qcom_glink_pipe *rx,
+ 					   struct qcom_glink_pipe *tx,
+ 					   bool intentless);
++struct qcom_glink *qcom_glink_native_resume(struct device *dev,
++					    unsigned long features,
++					    struct qcom_glink_pipe *rx,
++					    struct qcom_glink_pipe *tx,
++					    bool intentless);
++int qcom_glink_native_handover(struct qcom_glink *glink, const char *name,
++			       unsigned int lcid);
+ void qcom_glink_native_remove(struct qcom_glink *glink);
+ void qcom_glink_native_rx(struct qcom_glink *glink);
+ 
+diff --git a/drivers/rpmsg/qcom_glink_rpm.c b/drivers/rpmsg/qcom_glink_rpm.c
+index 1c05500f2..f229cdddc 100644
+--- a/drivers/rpmsg/qcom_glink_rpm.c
++++ b/drivers/rpmsg/qcom_glink_rpm.c
+@@ -285,6 +285,21 @@ static int glink_rpm_parse_toc(struct device *dev,
+ 	return -EINVAL;
+ }
+ 
++/*
++ * After a kexec the RPM keeps the rpm_requests channel open under the local
++ * id the previous kernel gave it and does not announce it again. That id is
++ * the first one qcom_glink hands out, and a kernel that took the channel over
++ * keeps it, so it is always 1.
++ *
++ * handover: -1 when the FIFOs show a previous user, 0 never, 1 always.
++ */
++static int handover = -1;
++module_param(handover, int, 0444);
++MODULE_PARM_DESC(handover, "Take over the RPM channel a previous kernel opened (-1 auto, 0 no, 1 yes)");
++
++#define GLINK_RPM_HANDOVER_CHANNEL	"rpm_requests"
++#define GLINK_RPM_HANDOVER_LCID		1
++
+ static int glink_rpm_probe(struct platform_device *pdev)
+ {
+ 	struct qcom_glink *glink;
+@@ -295,6 +310,8 @@ static int glink_rpm_probe(struct platform_device *pdev)
+ 	struct device *dev = &pdev->dev;
+ 	struct resource r;
+ 	int ret;
++	u32 tx_tail, rx_head;
++	bool resume;
+ 
+ 	rpm = devm_kzalloc(&pdev->dev, sizeof(*rpm), GFP_KERNEL);
+ 	if (!rpm)
+@@ -345,14 +362,21 @@ static int glink_rpm_probe(struct platform_device *pdev)
+ 	 * for commands (and fall over), rewinding our RX tail replays the
+ 	 * RPM's old replies to us. On a cold boot both are at zero anyway.
+ 	 */
+-	writel(readl(rpm->tx_pipe.tail), rpm->tx_pipe.head);
+-	writel(readl(rpm->rx_pipe.head), rpm->rx_pipe.tail);
+-
+-	glink = qcom_glink_native_probe(dev,
+-					0,
+-					&rpm->rx_pipe.native,
+-					&rpm->tx_pipe.native,
+-					true);
++	tx_tail = readl(rpm->tx_pipe.tail);
++	rx_head = readl(rpm->rx_pipe.head);
++	resume = handover > 0 || (handover < 0 && (tx_tail || rx_head));
++	dev_info(dev, "FIFOs: tx head %#x tail %#x, rx head %#x tail %#x%s\n",
++		 readl(rpm->tx_pipe.head), tx_tail, rx_head,
++		 readl(rpm->rx_pipe.tail), resume ? ", resuming the link" : "");
++	writel(tx_tail, rpm->tx_pipe.head);
++	writel(rx_head, rpm->rx_pipe.tail);
++
++	if (resume)
++		glink = qcom_glink_native_resume(dev, 0, &rpm->rx_pipe.native,
++						 &rpm->tx_pipe.native, true);
++	else
++		glink = qcom_glink_native_probe(dev, 0, &rpm->rx_pipe.native,
++						&rpm->tx_pipe.native, true);
+ 	if (IS_ERR(glink)) {
+ 		mbox_free_channel(rpm->mbox_chan);
+ 		return PTR_ERR(glink);
+@@ -364,6 +388,15 @@ static int glink_rpm_probe(struct platform_device *pdev)
+ 
+ 	enable_irq(rpm->irq);
+ 
++	/* After the IRQ, so the channel's users get their replies */
++	if (resume) {
++		ret = qcom_glink_native_handover(glink, GLINK_RPM_HANDOVER_CHANNEL,
++						 GLINK_RPM_HANDOVER_LCID);
++		if (ret)
++			dev_err(dev, "failed to take over %s: %d\n",
++				GLINK_RPM_HANDOVER_CHANNEL, ret);
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.47.3
+

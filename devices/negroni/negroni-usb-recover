@@ -1,0 +1,74 @@
+#!/bin/sh
+# Recover USB host + charging on the OnePlus 10 Pro when the PD Ethernet
+# adapter was already powered when the phone booted (or was plugged in with
+# the charger attached). In that state the ADSP never re-detects the cable
+# and the SuperSpeed link never trains. Recipe found empirically:
+#   1. re-create the dwc3 host controller (fresh PHY init)
+#   2. force the role switch to host
+#   3. Type-C disable, 2 s, DRP via the Oplus USB_TYPEC_MODE property
+# Needs the qcom_battmgr debugfs knob (usb_prop). Run as root.
+set -u
+IFACE=${IFACE:-eth0}
+TRIES=${TRIES:-4}
+DWC3=a600000.usb
+ROLE=/sys/class/usb_role/$DWC3-role-switch/role
+KNOB=/sys/kernel/debug/qcom_battmgr/usb_prop
+TYPEC_MODE=19; DRP=0; DISABLE=3
+
+up() { [ "$(cat /sys/class/net/$IFACE/operstate 2>/dev/null)" = up ]; }
+
+# udev does not apply a .link MACAddress to this hot-plugged NIC and networkd
+# only applies the .network one on (re)configure, so enforce it here.
+want_mac=$(sed -n 's/^MACAddress=//p' /etc/systemd/network/20-eth.network 2>/dev/null | head -n 1 | tr 'A-F' 'a-f')
+fix_mac() {
+    [ -n "$want_mac" ] || return 0
+    [ "$(cat /sys/class/net/$IFACE/address 2>/dev/null)" = "$want_mac" ] && return 0
+    echo "$IFACE has the wrong MAC; re-enumerating for $want_mac"
+    # Never take the link down: r8152 runtime-suspends and this port loses
+    # it. Re-authorising the USB device re-enumerates it cleanly, and udev
+    # applies the .link MAC on that path; set it by hand if it still differs.
+    usbdev=$(readlink -f "/sys/class/net/$IFACE/device/..")
+    if [ -w "$usbdev/authorized" ]; then
+        echo 0 > "$usbdev/authorized"; sleep 2; echo 1 > "$usbdev/authorized"
+        for i in $(seq 1 15); do [ -e "/sys/class/net/$IFACE" ] && break; sleep 1; done
+        sleep 1
+    fi
+    if [ "$(cat /sys/class/net/$IFACE/address 2>/dev/null)" != "$want_mac" ]; then
+        ip link set "$IFACE" address "$want_mac" || echo "could not set MAC on $IFACE"
+    fi
+    ip link set "$IFACE" up 2>/dev/null
+    networkctl reconfigure "$IFACE"
+    sleep 8
+}
+# r8152 resets the adapter by itself a few seconds after link-up and that
+# restores the factory MAC, so one check right after link-up is not enough.
+settle_mac() { for i in 1 2 3 4; do sleep 5; fix_mac; done; }
+
+if up; then settle_mac; echo "$IFACE already up"; exit 0; fi
+mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug
+[ -w "$KNOB" ] || { echo "missing $KNOB (patched qcom_battmgr?)"; exit 1; }
+# A cable attached before boot shows neither a partner nor USB power (that is
+# the bug being worked around), so ask the ADSP whether a cable is present.
+cid=$(echo "get 18" > "$KNOB" 2>/dev/null && cat "$KNOB")
+if [ ! -d /sys/class/typec/port0-partner ] && [ "$cid" != 1 ]; then
+    echo "no USB-C partner and ADSP reports no cable (cid=$cid); nothing to recover"; exit 0
+fi
+
+for try in $(seq 1 "$TRIES"); do
+    echo "recover attempt $try"
+    echo $DWC3 > /sys/bus/platform/drivers/dwc3-qcom/unbind
+    sleep 3
+    echo $DWC3 > /sys/bus/platform/drivers/dwc3-qcom/bind
+    sleep 4
+    echo host > "$ROLE"
+    sleep 3
+    echo "set $TYPEC_MODE $DISABLE" > "$KNOB"
+    sleep 2
+    echo "set $TYPEC_MODE $DRP" > "$KNOB"
+    for i in $(seq 1 20); do
+        sleep 1
+        up && { echo "$IFACE up after attempt $try"; settle_mac; exit 0; }
+    done
+done
+echo "$IFACE still down after $TRIES attempts"
+exit 1

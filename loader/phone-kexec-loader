@@ -1,0 +1,202 @@
+#!/bin/bash
+# Boot-time kexec loader: the phone's own boot slots on top of the bootloader.
+#
+# The bootloader always boots the kernel in its active slot (the "loader"
+# kernel, changed rarely and deliberately). Packaged kernels live in /boot and
+# /var/lib/phone-boot/state says which of them to run:
+#
+#   good=<release>      the last kernel that passed the health check (bless)
+#   trial=<release>     a newly installed kernel to try first
+#   tries=<n>           boots left for the trial before it is given up
+#   launched=<release>  the kernel this loader last kexec'd; bless clears it
+#                       once that kernel is healthy
+#   strikes=<n>         launches of good in a row that were never blessed
+#
+# On a bootloader boot this unit runs very early (before the firmware loader,
+# so no DSP, modem or USB-PD activity has started) and kexecs the trial kernel
+# while it has tries left, otherwise the good kernel, otherwise it stays on the
+# loader kernel. A launch that was never blessed (the kernel hung, crashed or
+# failed its health check, and a reset or bless's reboot brought the phone back
+# to the bootloader) costs the trial a try, or the good kernel a strike; after
+# two strikes the loader stays on the loader kernel until `phone-kexec-loader
+# reset` or a new trial. So no kernel in /boot can trap the phone in a loop:
+# the worst case is two resets, and the bootloader's kernel underneath is
+# something no package install can touch.
+#
+# A bootloader boot is recognised by a marker word on the command line,
+# which phone-kexec-test strips for every kexec'd kernel:
+# PHONE_BOOT_LOADER_MARK in /etc/default/phone-boot, by default `earlycon`
+# (negroni's bootloader passes it, and it faults into EDL in a kexec'd
+# kernel). rhodep's bootloader passes nothing of the kind, so its boot image
+# carries its own marker, phone.loader.
+#
+# A bootloader boot also keeps a copy of what the previous kernel left in
+# pstore (its console, so the report of a panic) in /var/lib/phone-boot/pstore.
+#
+#   phone-kexec-loader           the boot-time run (the systemd unit)
+#   phone-kexec-loader status    show the state
+#   phone-kexec-loader reset     clear the strikes and the pending launch
+set -euo pipefail
+# shellcheck source=/dev/null
+[ -f "${PHONE_BOOT_DEFAULTS:-/etc/default/phone-boot}" ] && . "${PHONE_BOOT_DEFAULTS:-/etc/default/phone-boot}"
+mark=${PHONE_BOOT_LOADER_MARK:-earlycon}
+state=${PHONE_BOOT_STATE:-/var/lib/phone-boot/state}
+run=${PHONE_BOOT_RUN:-/run/phone-boot}
+cmdline=${PHONE_BOOT_CMDLINE:-/proc/cmdline}
+bootdir=${PHONE_BOOT_BOOTDIR:-/boot}
+moddir=${PHONE_BOOT_MODDIR:-/usr/lib/modules}
+kexec_test=${PHONE_KEXEC_TEST:-phone-kexec-test}
+# FLAVOUR: only kernels named <version>-<FLAVOUR>-<build> are ever kexec'd.
+# Several names, space-separated, while a device's builds change name: the
+# good kernel keeps the old one until a kernel with the new one is blessed.
+FLAVOUR=
+# shellcheck source=/dev/null
+[ -f "${PHONE_BOOT_CONF:-/etc/default/phone-kexec}" ] && . "${PHONE_BOOT_CONF:-/etc/default/phone-kexec}"
+max_strikes=${PHONE_BOOT_MAX_STRIKES:-2}
+# The loader runs before the journal is flushed to disk, so its messages
+# would not survive the kexec; they also go to a small log next to the state.
+logfile=${PHONE_BOOT_LOG:-$(dirname "$state")/log}
+log() {
+    echo "phone-kexec-loader: $*"
+    logger -t phone-kexec-loader -- "$*" 2>/dev/null || true
+    { mkdir -p "$(dirname "$logfile")" && echo "$(date -Is) phone-kexec-loader [$(uname -r)]: $*" >> "$logfile" && sync "$logfile"; } 2>/dev/null || true
+    if [ "$(wc -l < "$logfile" 2>/dev/null || echo 0)" -gt 2000 ]; then tail -n 1000 "$logfile" > "$logfile.tmp" && mv "$logfile.tmp" "$logfile"; fi 2>/dev/null || true
+}
+
+good= trial= tries=0 launched= strikes=0
+# shellcheck source=/dev/null
+[ -f "$state" ] && . "$state"
+save() {
+    mkdir -p "$(dirname "$state")"
+    printf 'good=%s\ntrial=%s\ntries=%s\nlaunched=%s\nstrikes=%s\n' \
+        "${good:-}" "${trial:-}" "${tries:-0}" "${launched:-}" "${strikes:-0}" > "$state.tmp"
+    mv "$state.tmp" "$state"
+    sync "$state" 2>/dev/null || sync
+}
+
+case ${1:-boot} in
+status)
+    printf 'good=%s trial=%s tries=%s launched=%s strikes=%s (max %s)\n' \
+        "${good:-}" "${trial:-}" "${tries:-0}" "${launched:-}" "${strikes:-0}" "$max_strikes"
+    exit 0 ;;
+reset)
+    launched= strikes=0; save
+    log "strikes and pending launch cleared (good=${good:-<none>} trial=${trial:-<none>})"
+    exit 0 ;;
+boot) ;;
+*) echo "usage: phone-kexec-loader [status|reset]" >&2; exit 2 ;;
+esac
+
+running=${PHONE_BOOT_RUNNING:-$(uname -r)}
+mkdir -p "$run"
+echo "$running" > "$run/running"
+
+if ! tr ' ' '\n' < "$cmdline" | grep -qxF -- "$mark"; then
+    # Kexec'd kernel: nothing to do but leave a marker for bless.
+    echo "$running" > "$run/kexec-booted"
+    log "running kexec'd kernel $running"
+    exit 0
+fi
+echo "$running" > "$run/loader"
+
+# The previous kernel's console (with its panic or lockup report, if that is
+# how it ended) survives the reset only in the ramoops zone. systemd-pstore
+# moves it to /var/lib/systemd/pstore/console-ramoops-0, but the kexec'd
+# kernel's systemd-pstore then archives this kernel's console under the same
+# name over it. So keep a copy next to the state first (the unit runs before
+# systemd-pstore), the newest few.
+pstore=${PHONE_BOOT_PSTORE:-/sys/fs/pstore}
+pstore_keep=${PHONE_BOOT_PSTORE_KEEP:-10}
+keep_pstore() {
+    local dir dst how
+    compgen -G "$pstore/*" > /dev/null || return 0
+    dir=$(dirname "$state")/pstore
+    mkdir -p "$dir"
+    dst=$(mktemp -d "$dir/$(date +%Y%m%dT%H%M%S)-XXXX")
+    cp -p "$pstore"/* "$dst"/
+    sync -f "$dst" 2>/dev/null || sync
+    ls -1dt "$dir"/*/ | tail -n +$((pstore_keep + 1)) | xargs -r rm -rf
+    how=$(cat "$dst"/* | tr -d '\000' | grep -a -m1 -E 'soft lockup|hard LOCKUP|blocked for more than|Unable to handle kernel|Internal error:|Kernel panic - not syncing' | sed 's/^\[[ 0-9.]*\] *//' | cut -c1-160 || true)
+    log "kept the previous kernel's pstore in $dst${how:+; it ended with: $how}"
+}
+keep_pstore || log "could not keep the previous kernel's pstore"
+
+bootable() { [ -n "$1" ] && [ -s "$bootdir/vmlinuz-$1" ] && [ -s "$bootdir/initrd.img-$1" ] && [ -d "$moddir/$1/kernel" ]; }
+ours() {
+    local f
+    [ -n "$FLAVOUR" ] || return 0
+    for f in $FLAVOUR; do case $1 in *-"$f"-*) return 0 ;; esac; done
+    return 1
+}
+
+# The previous launch never reached bless: charge it to the kernel it launched.
+if [ -n "$launched" ]; then
+    if [ "$launched" = "$trial" ]; then
+        log "trial $launched was not blessed after its last launch (${tries:-0} tries left)"
+    elif [ "$launched" = "$good" ]; then
+        strikes=$(( ${strikes:-0} + 1 ))
+        log "good $launched was not blessed after its last launch (strike $strikes of $max_strikes)"
+    else
+        log "$launched was launched but is neither trial nor good any more"
+    fi
+    launched=; save
+fi
+
+target=
+if [ -n "$trial" ]; then
+    if ! ours "$trial"; then
+        log "trial $trial is not a $FLAVOUR phone kernel; dropping it"
+        trial= tries=0; save
+    elif ! bootable "$trial"; then
+        log "trial $trial is not installed any more; dropping it"
+        trial= tries=0; save
+    elif [ "${tries:-0}" -gt 0 ]; then
+        tries=$((tries - 1)); save
+        target=$trial
+        log "trying $trial ($tries tries left after this one)"
+    else
+        log "trial $trial used up its tries without being blessed; falling back to good ${good:-<none>}"
+        trial= tries=0; save
+    fi
+fi
+if [ -z "$target" ] && [ -n "$good" ]; then
+    if ! ours "$good"; then
+        log "good $good is not a $FLAVOUR phone kernel; staying on the loader kernel $running"
+        good= strikes=0; save
+    elif ! bootable "$good"; then
+        log "good $good is not installed; staying on the loader kernel $running"
+        good= strikes=0; save
+    elif [ "${strikes:-0}" -ge "$max_strikes" ]; then
+        log "good $good was not blessed $strikes times in a row; staying on the loader kernel $running (phone-kexec-loader reset, or a new trial, to try again)"
+    else
+        target=$good
+    fi
+fi
+if [ -z "$target" ]; then
+    log "no kernel to kexec; staying on the loader kernel $running"
+    exit 0
+fi
+if [ "$target" = "$running" ]; then
+    log "$target is the loader kernel itself; nothing to do"
+    exit 0
+fi
+
+# A try is only spent on a handover that happened: undo it if staging or the
+# handover itself fails, so the boot carries on and the trial keeps its tries.
+refund() {
+    [ "$target" = "$trial" ] && tries=$(( ${tries:-0} + 1 ))
+    launched=; save
+}
+echo "$target" > "$run/target"
+if ! "$kexec_test" load "$target"; then
+    log "staging $target failed; staying on the loader kernel $running"
+    refund
+    exit 0
+fi
+launched=$target; save
+log "handing over to $target"
+if ! "$kexec_test" go; then
+    log "handover to $target failed before the jump; staying on the loader kernel $running"
+    refund
+    exit 0
+fi

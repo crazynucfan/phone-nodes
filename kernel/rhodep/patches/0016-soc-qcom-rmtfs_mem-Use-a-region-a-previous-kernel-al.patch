@@ -1,0 +1,49 @@
+From 1069db30ddd18506695e743f05ea372472b76c5a Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 00:40:18 +0000
+Subject: [PATCH 16/16] soc: qcom: rmtfs_mem: Use a region a previous kernel
+ already assigned
+
+The first kernel assigns the rmtfs region from HLOS to HLOS plus the
+remote's VMIDs. On SM6375 the secure world then refuses every further
+assignment of it (-EINVAL): from HLOS, from the current owners, and back
+to HLOS alone, even from the kernel that made it. After a kexec the next
+kernel's probe failed, rmtfs had no memory, and the modem that kernel
+boots crashed reading its file system; the recovery hung the SoC.
+
+The region is still shared with HLOS and the remote, as this driver
+wants it. When the assignment is refused, warn and use the region as it
+is, and do not try to give it back on remove.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/soc/qcom/rmtfs_mem.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/soc/qcom/rmtfs_mem.c b/drivers/soc/qcom/rmtfs_mem.c
+index 342c08451..7aeb706a5 100644
+--- a/drivers/soc/qcom/rmtfs_mem.c
++++ b/drivers/soc/qcom/rmtfs_mem.c
+@@ -273,8 +273,17 @@ static int qcom_rmtfs_mem_probe(struct platform_device *pdev)
+ 		ret = qcom_scm_assign_mem(rmtfs_mem->addr, rmtfs_mem->size,
+ 					  &rmtfs_mem->perms, perms, num_vmids + 1);
+ 		if (ret < 0) {
+-			dev_err(&pdev->dev, "assign memory failed\n");
+-			goto remove_cdev;
++			/*
++			 * After a kexec the region is still assigned the way the
++			 * previous kernel left it: shared between HLOS and the
++			 * remote, as wanted. The secure world will not assign it
++			 * again (not even back to HLOS alone), so use it as it is
++			 * and leave it be on remove.
++			 */
++			rmtfs_mem->perms = 0;
++			dev_warn(&pdev->dev,
++				 "cannot assign the region (%d); using it as a previous kernel left it\n",
++				 ret);
+ 		}
+ 	}
+ 
+-- 
+2.47.3
+

@@ -1,0 +1,7 @@
+# /etc/default/phone-kexec: which kernels are this device's.
+# Kernel releases of the device's builds look like <version>-<FLAVOUR>-<build>
+# (FLAVOUR is the device codename, CONFIG_LOCALVERSION in its defconfig); the
+# loader and its trial hook ignore every other kernel, since a distribution
+# kernel cannot boot the phone. Several names, space-separated, while a
+# device's builds change name.
+FLAVOUR="negroni"

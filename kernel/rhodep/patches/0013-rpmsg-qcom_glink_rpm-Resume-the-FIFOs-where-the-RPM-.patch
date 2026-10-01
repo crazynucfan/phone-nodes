@@ -1,0 +1,48 @@
+From 2be8d926f66395b23ed27499b96a2314fd8c821f Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 22:46:46 +0100
+Subject: [PATCH 13/13] rpmsg: qcom_glink_rpm: Resume the FIFOs where the RPM
+ left them
+
+glink_rpm_probe() zeroes the TX head and the RX tail in message RAM.
+That matches the RPM on a cold boot, but not in a kernel started by
+kexec: the RPM's TX tail and RX head are wherever the previous kernel
+left them. A zeroed TX head makes the RPM consume a wrap's worth of
+stale FIFO contents as commands; on SM6375 (moto g82 5G) the RPM falls
+over and takes the SoC with it about 0.13 s into the new kernel, with
+the new kernel meanwhile reading the RPM's old replies from a zeroed RX
+tail ("unhandled rx cmd: 20").
+
+Set the TX head to the RPM's TX tail and the RX tail to the RPM's RX
+head instead: nothing pending in either direction, whatever state the
+FIFOs are in. On a cold boot these are zero, as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/rpmsg/qcom_glink_rpm.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/rpmsg/qcom_glink_rpm.c b/drivers/rpmsg/qcom_glink_rpm.c
+index e3ba2c63a..1c05500f2 100644
+--- a/drivers/rpmsg/qcom_glink_rpm.c
++++ b/drivers/rpmsg/qcom_glink_rpm.c
+@@ -339,8 +339,14 @@ static int glink_rpm_probe(struct platform_device *pdev)
+ 	rpm->tx_pipe.native.write = glink_rpm_tx_write;
+ 	rpm->tx_pipe.native.kick = glink_rpm_tx_kick;
+ 
+-	writel(0, rpm->tx_pipe.head);
+-	writel(0, rpm->rx_pipe.tail);
++	/*
++	 * Start where the RPM is, not at zero. After a kexec the FIFOs are in
++	 * use: rewinding our TX head makes the RPM take stale FIFO contents
++	 * for commands (and fall over), rewinding our RX tail replays the
++	 * RPM's old replies to us. On a cold boot both are at zero anyway.
++	 */
++	writel(readl(rpm->tx_pipe.tail), rpm->tx_pipe.head);
++	writel(readl(rpm->rx_pipe.head), rpm->rx_pipe.tail);
+ 
+ 	glink = qcom_glink_native_probe(dev,
+ 					0,
+-- 
+2.43.0
+

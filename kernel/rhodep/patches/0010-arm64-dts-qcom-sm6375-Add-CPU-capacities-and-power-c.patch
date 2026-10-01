@@ -1,0 +1,99 @@
+From cca4313b946c41a0fda58733eafbbdc6ed023612 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 21:03:00 +0100
+Subject: [PATCH 10/13] arm64: dts: qcom: sm6375: Add CPU capacities and power
+ coefficients
+
+The CPU nodes have no capacity-dmips-mhz, so every core reports a capacity
+of 1024 and the scheduler treats the six Cortex-A55s like the two
+Cortex-A78s; without dynamic-power-coefficient there is no energy model
+either, so energy-aware scheduling stays off.
+
+Use the values kodiak (SC7280) gives the same cores: 1024 and 100 for
+the A55s, 1946 and 520 for the A78s. With the A55s at 1.8 GHz and the
+A78s at 2.2 GHz the A55s come out at about 440 of 1024.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm6375.dtsi | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm6375.dtsi b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+index 20a080c2a..e75ed7d80 100644
+--- a/arch/arm64/boot/dts/qcom/sm6375.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm6375.dtsi
+@@ -44,6 +44,8 @@ cpu0: cpu@0 {
+ 			reg = <0x0 0x0>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_0>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			operating-points-v2 = <&cpu0_opp_table>;
+@@ -70,6 +72,8 @@ cpu1: cpu@100 {
+ 			reg = <0x0 0x100>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_100>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			operating-points-v2 = <&cpu0_opp_table>;
+@@ -91,6 +95,8 @@ cpu2: cpu@200 {
+ 			reg = <0x0 0x200>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_200>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			operating-points-v2 = <&cpu0_opp_table>;
+@@ -112,6 +118,8 @@ cpu3: cpu@300 {
+ 			reg = <0x0 0x300>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_300>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			operating-points-v2 = <&cpu0_opp_table>;
+@@ -133,6 +141,8 @@ cpu4: cpu@400 {
+ 			reg = <0x0 0x400>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_400>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			operating-points-v2 = <&cpu0_opp_table>;
+@@ -154,6 +164,8 @@ cpu5: cpu@500 {
+ 			reg = <0x0 0x500>;
+ 			clocks = <&cpufreq_hw 0>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1024>;
++			dynamic-power-coefficient = <100>;
+ 			next-level-cache = <&l2_500>;
+ 			qcom,freq-domain = <&cpufreq_hw 0>;
+ 			operating-points-v2 = <&cpu0_opp_table>;
+@@ -175,6 +187,8 @@ cpu6: cpu@600 {
+ 			reg = <0x0 0x600>;
+ 			clocks = <&cpufreq_hw 1>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1946>;
++			dynamic-power-coefficient = <520>;
+ 			next-level-cache = <&l2_600>;
+ 			qcom,freq-domain = <&cpufreq_hw 1>;
+ 			operating-points-v2 = <&cpu6_opp_table>;
+@@ -196,6 +210,8 @@ cpu7: cpu@700 {
+ 			reg = <0x0 0x700>;
+ 			clocks = <&cpufreq_hw 1>;
+ 			enable-method = "psci";
++			capacity-dmips-mhz = <1946>;
++			dynamic-power-coefficient = <520>;
+ 			next-level-cache = <&l2_700>;
+ 			qcom,freq-domain = <&cpufreq_hw 1>;
+ 			operating-points-v2 = <&cpu6_opp_table>;
+-- 
+2.43.0
+

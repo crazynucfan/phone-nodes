@@ -1,0 +1,6 @@
+# /etc/apt/preferences.d/no-debian-kernels: Debian's kernels cannot boot the
+# phone, yet apt installs one to satisfy a Recommends (wireguard-tools pulls in
+# a linux-image-* for its module).
+Package: linux-image-*
+Pin: release o=Debian
+Pin-Priority: -1

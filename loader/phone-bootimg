@@ -1,0 +1,164 @@
+#!/bin/bash
+# Turn an installed phone kernel package into the Android boot images and
+# write them to the phone's boot partitions.
+#
+#   phone-bootimg <release> [--dry-run]
+#
+# Runs from /etc/kernel/postinst.d/zz-phone-bootimg after initramfs-tools has
+# built /boot/initrd.img-<release>, and can be run by hand. Settings come from
+# /etc/default/phone-bootimg (see loader/examples/phone-bootimg.negroni).
+#
+# Two layouts (LAYOUT):
+# - v4-ab: Android 12 A/B (negroni), boot image header v4: kernel and
+#   initramfs in boot, the DTB in vendor_boot, all written to slot SLOT.
+# - v2: non-A/B (apollo), header v2: the kernel with the DTB appended
+#   plus the DTB itself in boot, and the same image in recovery. No slots.
+#
+# Rules learned on negroni (2026-09-27):
+# - Only the newest installed phone kernel goes to the boot partitions.
+# - The initramfs must carry this release's modules: a kernel booted with
+#   another build's modules (same release string, module versioning off)
+#   crashes in early userspace.
+# - v4-ab: the slot must stay marked successful, or every reboot uses up a
+#   retry and the bootloader eventually falls back to Android on the other
+#   slot. This script warns loudly if it is not; it does not change GPT flags.
+# - Back up what is there, write, read back and compare, then flag a reboot.
+set -euo pipefail
+
+conf=/etc/default/phone-bootimg
+# shellcheck source=/dev/null
+. "$conf"   # LAYOUT CMDLINE DTB FLAVOUR SLOT STATE_DIR OS_VERSION OS_PATCH_LEVEL KEEP_BACKUPS
+
+LAYOUT=${LAYOUT:-v4-ab}
+case $LAYOUT in
+    v4-ab) parts=(boot vendor_boot recovery) ;;
+    v2) parts=(boot recovery); SLOT= ;;
+    *) echo "phone-bootimg: unknown LAYOUT $LAYOUT" >&2; exit 1 ;;
+esac
+
+rel=${1:?usage: phone-bootimg <release> [--dry-run]}
+dry=false
+[ "${2:-}" = --dry-run ] && dry=true
+log() { echo "phone-bootimg: $*"; logger -t phone-bootimg -- "$*" 2>/dev/null || true; }
+die() { log "ERROR: $*"; exit 1; }
+
+case $rel in
+    *-"$FLAVOUR"-*) ;;
+    *) log "$rel is not a $FLAVOUR phone kernel; nothing to do"; exit 0;;
+esac
+
+newest=$(for d in /usr/lib/linux-image-*-"$FLAVOUR"-*; do
+             [ -f "$d/$DTB" ] && basename "$d" | sed 's/^linux-image-//'
+         done | sort -V | tail -n1)
+if [ "$rel" != "$newest" ]; then
+    log "$rel is not the newest installed $FLAVOUR kernel ($newest); leaving the boot partitions alone"
+    exit 0
+fi
+
+kernel=/boot/vmlinuz-$rel
+initrd=/boot/initrd.img-$rel
+dtb=/usr/lib/linux-image-$rel/$DTB
+for f in "$kernel" "$initrd" "$dtb"; do
+    [ -s "$f" ] || die "missing $f"
+done
+[ -d "/usr/lib/modules/$rel/kernel" ] || die "no modules installed for $rel"
+lsinitramfs "$initrd" | grep -Eq "^(usr/)?lib/modules/$rel/" ||
+    die "$initrd does not contain modules for $rel"
+
+if [ "$LAYOUT" = v4-ab ]; then
+    running_slot=$(sed -n 's/^androidboot\.slot_suffix *= *"\(.*\)"$/\1/p' /proc/bootconfig 2>/dev/null || true)
+    if [ -n "$running_slot" ] && [ "$running_slot" != "$SLOT" ]; then
+        die "running from slot $running_slot but configured for $SLOT; refusing to write"
+    fi
+
+    # GPT attributes of boot$SLOT: warn unless it is marked successful.
+    boot_part=$(readlink -f "/dev/disk/by-partlabel/boot$SLOT")
+    disk=/dev/$(lsblk -no PKNAME "$boot_part")
+    attr=$(python3 - "$disk" "boot$SLOT" <<'EOF'
+import struct, sys
+d = open(sys.argv[1], "rb")
+d.seek(4096)
+hdr = d.read(92)
+lba, n, size = struct.unpack_from("<QII", hdr, 72)
+d.seek(lba * 4096)
+ent = d.read(n * size)
+for i in range(n):
+    e = ent[i * size:(i + 1) * size]
+    if e[56:128].decode("utf-16le").rstrip("\0") == sys.argv[2]:
+        print(struct.unpack_from("<Q", e, 48)[0] >> 48)
+EOF
+)
+    if [ -z "$attr" ] || [ $(((attr >> 6) & 1)) -ne 1 ] || [ $(((attr >> 7) & 1)) -ne 0 ]; then
+        log "WARNING: boot$SLOT is not marked successful/bootable (attr 0x$(printf %x "${attr:-0}")); every reboot now uses up a retry"
+    fi
+fi
+
+work=$STATE_DIR/$rel
+mkdir -p "$work"
+case $LAYOUT in
+v4-ab)
+    common=(--header_version 4 --pagesize 4096 --os_version "$OS_VERSION" --os_patch_level "$OS_PATCH_LEVEL")
+    mkbootimg --kernel "$kernel" --ramdisk "$initrd" "${common[@]}" --cmdline "$CMDLINE" -o "$work/boot.img"
+    mkbootimg --ramdisk "$initrd" "${common[@]}" -o "$work/recovery.img"
+    mkbootimg --header_version 4 --pagesize 4096 --vendor_boot "$work/vendor_boot.img" --dtb "$dtb"
+    ;;
+v2)
+    # The postmarketOS layout for apollo: DTB appended to the kernel and also
+    # passed as --dtb, at the stock offsets.
+    cat "$kernel" "$dtb" > "$work/Image.gz-dtb"
+    mkbootimg --kernel "$work/Image.gz-dtb" --ramdisk "$initrd" --dtb "$dtb" \
+        --header_version 2 --pagesize 4096 --base 0x00000000 --kernel_offset 0x00008000 \
+        --ramdisk_offset 0x01000000 --tags_offset 0x00000100 --dtb_offset 0x01f00000 \
+        --os_version "$OS_VERSION" --os_patch_level "$OS_PATCH_LEVEL" --cmdline "$CMDLINE" \
+        -o "$work/boot.img"
+    cp "$work/boot.img" "$work/recovery.img"
+    ;;
+esac
+
+for p in "${parts[@]}"; do
+    dev=/dev/disk/by-partlabel/$p$SLOT
+    [ -b "$dev" ] || die "no partition $p$SLOT"
+    img_size=$(stat -c %s "$work/$p.img")
+    part_size=$(blockdev --getsize64 "$dev")
+    [ "$img_size" -le "$part_size" ] || die "$p.img ($img_size bytes) does not fit $p$SLOT ($part_size bytes)"
+done
+
+if $dry; then
+    log "dry run: built ${parts[*]} images for $rel in $work; nothing written"
+    exit 0
+fi
+
+backup=$STATE_DIR/backup-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$backup"
+for p in "${parts[@]}"; do
+    dd if="/dev/disk/by-partlabel/$p$SLOT" of="$backup/$p$SLOT.img" bs=4M status=none
+done
+log "backed up the current boot partitions to $backup"
+# Keep only the newest KEEP_BACKUPS backups.
+find "$STATE_DIR" -maxdepth 1 -type d -name 'backup-*' | sort | head -n "-$KEEP_BACKUPS" |
+    while read -r old; do rm -rf "$old"; done
+
+# A half-written boot partition would only show at the next reboot, as a
+# phone that needs EDL (v4-ab) or fastboot (v2). So on any write or read-back
+# failure put the backup back before giving up.
+restore() {
+    log "restoring the previous boot partitions from $backup"
+    for p in "${parts[@]}"; do
+        dd if="$backup/$p$SLOT.img" of="/dev/disk/by-partlabel/$p$SLOT" bs=4M conv=fsync status=none ||
+            log "ERROR: restoring $p$SLOT failed too; flash $backup/$p$SLOT.img (fastboot, or the EDL rescue on negroni) before the next reboot"
+    done
+}
+for p in "${parts[@]}"; do
+    dev=/dev/disk/by-partlabel/$p$SLOT
+    size=$(stat -c %s "$work/$p.img")
+    if ! dd if="$work/$p.img" of="$dev" bs=4M conv=fsync status=none ||
+       ! cmp -n "$size" "$work/$p.img" "$dev"; then
+        restore
+        die "writing $p$SLOT failed; previous images restored"
+    fi
+done
+log "wrote and verified ${parts[*]} for $rel${SLOT:+ on slot $SLOT}"
+
+touch /var/run/reboot-required
+echo "linux-image-$rel" >> /var/run/reboot-required.pkgs
+log "reboot required to boot $rel"

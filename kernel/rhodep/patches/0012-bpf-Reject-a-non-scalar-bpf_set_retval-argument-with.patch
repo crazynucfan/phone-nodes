@@ -1,0 +1,46 @@
+From e6162f8f62d2bc46f9aff79fdf80e191460d1f53 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 21:50:33 +0100
+Subject: [PATCH 12/13] bpf: Reject a non-scalar bpf_set_retval() argument with
+ -EACCES
+
+v7.2.8 gained a check that bpf_set_retval()'s argument is a scalar,
+failing the program load with -EINVAL otherwise. Every other register
+type mismatch in the verifier fails with -EACCES (check_reg_type()),
+and before this check a pointer argument was accepted for privileged
+programs.
+
+The difference matters to feature probes. cilium/ebpf probes a helper
+by loading a program that calls it with whatever the registers hold (R1
+is the context pointer) and reads -EACCES as "the helper exists, the
+arguments are wrong" and -EINVAL as "no such helper", or an unknown
+failure. Cilium 1.20.1's agent probes bpf_set_retval for cgroup/sock
+programs at startup and exits on this kernel:
+
+  failed to probe helper ... FnSetRetval for program type CGroupSock:
+  load program: invalid argument: ... R1 is not a scalar
+
+Fail the check with -EACCES like the other type checks; programs that
+pass a non-scalar are rejected as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ kernel/bpf/verifier.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 1a0cd37b0..ab50121c3 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -10476,7 +10476,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
+ 
+ 		if (r1->type != SCALAR_VALUE) {
+ 			verbose(env, "R1 is not a scalar\n");
+-			return -EINVAL;
++			return -EACCES;
+ 		}
+ 
+ 		/* CGROUP_GETSOCKOPT is allowed to return arbitrary value */
+-- 
+2.43.0
+

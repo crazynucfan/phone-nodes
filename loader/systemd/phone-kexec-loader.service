@@ -1,0 +1,23 @@
+[Unit]
+Description=Kexec the trial or good kernel from /boot on a bootloader boot
+Documentation=file:/usr/local/sbin/phone-kexec-loader
+DefaultDependencies=no
+# Needs the root filesystem writable (/boot, /usr/lib/modules and
+# /var/lib/phone-boot all live on it) and nothing else. It runs before the
+# firmware loader, so on a bootloader boot no DSP, modem or USB-PD activity has
+# started when it jumps, and before the k3s agent, whose shutdown inhibitor
+# would hold the kexec.
+After=systemd-remount-fs.service systemd-journald.socket
+Before=msm-firmware-loader.service systemd-udevd.service network-pre.target negroni-usb-recover.service k3s-agent.service sysinit.target
+# systemd-pstore moves the previous kernel's records away; the loader keeps its copy first.
+Before=systemd-pstore.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/phone-kexec-loader
+TimeoutStartSec=180
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

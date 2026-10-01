@@ -1,0 +1,306 @@
+#!/bin/bash
+# Try a kernel on a phone node with kexec, without writing any boot partition.
+# If the kexec'd kernel misbehaves, a reboot (watchdog, or holding power ~15 s)
+# goes back through the bootloader to the untouched boot partition.
+#
+#   sudo phone-kexec-test snapshot <name>     record the node's health
+#   sudo phone-kexec-test extract [<part>]    kernel + ramdisk out of a boot
+#                                             partition (default: the running
+#                                             slot's boot, else boot), or out
+#                                             of a boot image file
+#   sudo phone-kexec-test load current [args] stage what the boot partition has
+#   sudo phone-kexec-test load <release> [args]
+#                                             stage /boot/vmlinuz-<release> and
+#                                             /boot/initrd.img-<release>; any
+#                                             [args] are appended to the command
+#                                             line (e.g. panic=10 oops=panic)
+#   sudo phone-kexec-test fdt-diff <release>  what the bootloader changed: the
+#                                             running device tree against the
+#                                             package's DTB (needs dtc)
+#   phone-kexec-test compare <a> <b>          diff two snapshots
+#   sudo phone-kexec-test slot                A/B boot partition flags (negroni):
+#                                             boot_b must say successful
+#   sudo phone-kexec-test go                  stop DSPs/modem/rmtfs, shut down cleanly, run the staged kernel
+#
+# The staged kernel gets the running device tree (/sys/firmware/fdt, which
+# carries the bootloader's fixups) and the running command line. That is right
+# for the same kernel and for a build of the same device tree source; a kernel
+# with a changed DTB needs the fixups carried over (see fdt-diff).
+set -euo pipefail
+dir=/var/lib/phone-kexec-test
+mkdir -p "$dir"
+die() { echo "phone-kexec-test: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || [ "${1:-}" = compare ] || die "run as root"
+
+# Kernel and ramdisk out of an Android boot image, header v2 (DTB appended to
+# the kernel, as on apollo) or v3/v4 (negroni).
+extract_bootimg() { # <image or partition> <out dir>
+    python3 - "$1" "$2" <<'EOF'
+import struct, sys, os
+src, out = sys.argv[1], sys.argv[2]
+f = open(src, "rb"); h = f.read(4096)
+if h[:8] != b"ANDROID!":
+    sys.exit(f"{src}: not an Android boot image")
+ver = struct.unpack_from("<I", h, 40)[0]
+align = lambda n, p: (n + p - 1) // p * p
+if ver >= 3:
+    ksize, rsize = struct.unpack_from("<II", h, 8)
+    page, koff = 4096, 4096
+    cmdline = h[44:44 + 1536].split(b"\0")[0].decode()
+else:
+    ksize, _, rsize = struct.unpack_from("<III", h, 8)
+    page = struct.unpack_from("<I", h, 36)[0]
+    koff = page
+    cmdline = (h[64:64 + 512].split(b"\0")[0] + h[608:608 + 1024].split(b"\0")[0]).decode()
+roff = koff + align(ksize, page)
+f.seek(koff); kernel = f.read(ksize)
+f.seek(roff); ramdisk = f.read(rsize)
+os.makedirs(out, exist_ok=True)
+open(os.path.join(out, "kernel"), "wb").write(kernel)
+open(os.path.join(out, "ramdisk"), "wb").write(ramdisk)
+open(os.path.join(out, "cmdline"), "w").write(cmdline + "\n")
+print(f"header v{ver}: kernel {ksize} bytes, ramdisk {rsize} bytes, cmdline: {cmdline}")
+EOF
+}
+
+running_slot() {
+    sed -n 's/^androidboot\.slot_suffix *= *"\(.*\)"$/\1/p' /proc/bootconfig 2>/dev/null || true
+}
+
+snapshot() { # <name>
+    local out="$dir/$1.txt" r
+    {
+        echo "## kernel"; uname -r; cat /proc/cmdline
+        echo "## uptime"; cut -d' ' -f1 /proc/uptime
+        echo "## remoteproc"
+        for r in /sys/class/remoteproc/*; do [ -e "$r" ] && echo "$(cat "$r/name") $(cat "$r/state")"; done
+        echo "## typec"
+        for r in /sys/class/typec/*; do [ -e "$r" ] && echo "$(basename "$r") $(cat "$r/data_role" 2>/dev/null) $(cat "$r/power_role" 2>/dev/null)"; done
+        echo "## power_supply"
+        for r in /sys/class/power_supply/*; do
+            [ -e "$r" ] || continue
+            echo "$(basename "$r") type=$(cat "$r/type" 2>/dev/null) online=$(cat "$r/online" 2>/dev/null) status=$(cat "$r/status" 2>/dev/null) capacity=$(cat "$r/capacity" 2>/dev/null)"
+        done
+        echo "## net"; ip -br link; ip -br addr; ip route show default
+        gw=$(ip route show default | awk '{print $3; exit}')
+        if [ -n "$gw" ] && ping -c1 -W2 "$gw" >/dev/null 2>&1; then echo "gateway $gw reachable"; else echo "gateway ${gw:-none} NOT reachable"; fi
+        echo "## wifi"; iw dev 2>/dev/null | grep -E 'Interface|ssid' || true
+        echo "## usb"; for r in /sys/bus/usb/devices/*/product; do [ -e "$r" ] && echo "$(basename "$(dirname "$r")") $(cat "$r")"; done
+        echo "## drm"; for r in /sys/class/drm/*/status; do [ -e "$r" ] && echo "$(basename "$(dirname "$r")") $(cat "$r")"; done
+        echo "## services"
+        for u in systemd-networkd systemd-resolved "wpa_supplicant@wlp1s0" negroni-usb-recover msm-firmware-loader rmtfs tqftpserv negroni-charge-limit k3s-agent; do
+            echo "$u $(systemctl is-active "$u" 2>/dev/null || true)"
+        done
+        echo "## failed units"; systemctl --failed --no-legend --plain | awk '{print $1}'
+        echo "## modules $(lsmod | tail -n +2 | wc -l)"
+        echo "## kernel log (err and worse, and the usual kexec trouble spots)"
+        dmesg --level=emerg,alert,crit,err | tail -n 40
+        for p in 'Oops|BUG:|WARNING:|Call trace' 'smmu|iommu' 'ufs' 'remoteproc|q6v5|adsp' 'pmic_glink|ucsi|typec|battmgr' 'r8152|xhci|dwc3'; do
+            echo "count[$p] $(dmesg | grep -c -i -E "$p" || true)"
+        done
+    } > "$out" 2>&1
+    lsmod | tail -n +2 | awk '{print $1}' | sort > "$dir/$1.modules"
+    echo "snapshot written to $out"
+}
+
+case ${1:-} in
+snapshot) snapshot "${2:?name}" ;;
+extract)
+    part=${2:-}
+    if [ -n "$part" ] && [ -f "$part" ]; then
+        extract_bootimg "$part" "$dir/current"
+        exit 0
+    fi
+    if [ -z "$part" ]; then
+        part=boot$(running_slot)
+    fi
+    dev=/dev/disk/by-partlabel/$part
+    [ -b "$dev" ] || die "no partition $part"
+    extract_bootimg "$dev" "$dir/current"
+    ;;
+load)
+    what=${2:?current or a kernel release}
+    command -v kexec >/dev/null || die "kexec-tools is not installed"
+    command -v phone-kexec-dtb >/dev/null || die "phone-kexec-dtb is not installed"
+    if [ "$what" = current ]; then
+        [ -s "$dir/current/kernel" ] || die "run extract first"
+        kernel=$dir/current/kernel initrd=$dir/current/ramdisk
+    else
+        kernel=/boot/vmlinuz-$what initrd=/boot/initrd.img-$what
+        [ -s "$kernel" ] && [ -s "$initrd" ] || die "no $kernel or $initrd"
+        [ -d "/usr/lib/modules/$what/kernel" ] || die "no modules for $what"
+    fi
+    shift 2
+    # The bootloader's earlycon points at a UART the kexec'd kernel cannot
+    # touch (it faults into EDL), and its bootconfig blob is not carried over;
+    # the loader's marker (phone-kexec-loader) tells a bootloader boot apart,
+    # so a kexec'd kernel must not have it. Everything else is kept.
+    # shellcheck source=/dev/null
+    [ -f /etc/default/phone-boot ] && . /etc/default/phone-boot
+    mark=${PHONE_BOOT_LOADER_MARK:-earlycon}
+    cmdline=$(tr ' ' '\n' < /proc/cmdline | grep -vxF -e earlycon -e bootconfig -e "$mark" | tr '\n' ' ' | sed 's/ *$//')
+    # Device extras (PHONE_KEXEC_ARGS), then the caller's; the kernel and the
+    # initramfs take the last of a repeated word.
+    for w in ${PHONE_KEXEC_ARGS:-}; do
+        tr ' ' '\n' <<< "$cmdline" | grep -qxF -- "$w" || cmdline="$cmdline $w"
+    done
+    [ $# -gt 0 ] && cmdline="$cmdline $*"
+    # Running device tree plus reservations for this kernel's GIC LPI tables,
+    # which the next kernel must reuse (LPIs cannot be disabled on this SoC).
+    # The package's DTB, for hardware the bootloader's tree does not describe.
+    pkg_dtb=
+    if [ "$what" != current ]; then
+        # shellcheck source=/dev/null
+        . /etc/default/phone-bootimg 2>/dev/null || true
+        pkg_dtb=/usr/lib/linux-image-$what/${DTB:-qcom/sm8450-oneplus-negroni.dtb}
+    fi
+    # A failure here must stop the load (set -e), never fall back to a stale tree.
+    dtb_report=$(phone-kexec-dtb "$dir/kexec.dtb" $pkg_dtb)
+    grep -i 'carried' <<< "$dtb_report" || true
+    echo "staging $kernel with $initrd"
+    echo "command line: $cmdline"
+    echo "device tree: $dir/kexec.dtb (running fdt, plus GIC LPI table reservations where the SoC has them)"
+    # Classic kexec_load (-c): kexec-tools places the segments low in RAM, away
+    # from the LPI tables at the start of the upper bank; kexec_file_load would
+    # put the initrd right on top of them.
+    kexec -c -l --dtb="$dir/kexec.dtb" --mem-max=0x7ffffffff "$kernel" --initrd="$initrd" --command-line="$cmdline"
+    [ "$(cat /sys/kernel/kexec_loaded)" = 1 ] || die "kexec did not stage the kernel"
+    echo "staged. Run: sudo phone-kexec-test go"
+    ;;
+go)
+    # Hand the hardware over cleanly, then shut down into the staged kernel.
+    [ "$(cat /sys/kernel/kexec_loaded)" = 1 ] || die "nothing staged (run load first)"
+    # Device settings (PHONE_KEXEC_RMTFS_HANDBACK below).
+    # shellcheck source=/dev/null
+    [ -f /etc/default/phone-boot ] && . /etc/default/phone-boot
+    # The kubelet holds a logind shutdown inhibitor; a `systemctl kexec` issued
+    # while it runs is held and logind then refuses further kexec requests
+    # ("Action kexec already in progress"). Stop it first.
+    if systemctl is-active --quiet k3s-agent; then
+        echo "stopping k3s-agent (it inhibits shutdown)"
+        systemctl stop k3s-agent
+    fi
+    # Stopping the agent leaves the pod containers running, and the shutdown
+    # then waits up to 90 s for each of their scopes. k3s ships a script that
+    # stops them (and tears down the CNI links) at once.
+    if [ -x /usr/local/bin/k3s-killall.sh ] && pgrep -f containerd-shim >/dev/null; then
+        echo "stopping the pod containers"
+        /usr/local/bin/k3s-killall.sh >/dev/null 2>&1 || echo "warning: k3s-killall.sh failed"
+    fi
+    # Only what is running: stopping a unit that has not started yet cancels its
+    # start job, and when go runs from the loader early in boot and fails, the
+    # boot carries on without it.
+    for u in phone-metrics.timer phone-metrics.service negroni-charge-limit.service; do
+        if systemctl is-active --quiet "$u"; then systemctl stop "$u"; fi
+    done
+    # The DSPs keep running across kexec otherwise (no shutdown hook); the modem
+    # first, and give its rmtfs memory back so the next kernel can assign it.
+    # Early in boot (the loader) the DSP drivers are not loaded yet: no
+    # remoteproc devices at all, and nothing to stop.
+    for r in /sys/class/remoteproc/remoteproc*; do
+        [ -e "$r/name" ] || continue
+        name=$(cat "$r/name")
+        [ "$name" = modem ] || continue
+        [ "$(cat "$r/state")" = running ] && { timeout 30 sh -c "echo stop > $r/state" || echo "warning: $name did not stop"; }
+    done
+    # Returning the rmtfs memory (unbinding qcom_rmtfs_mem, whose remove
+    # reassigns it to Linux) lets rmtfs work in the next kernel, which then
+    # boots the modem; every kexec that did this ended in EDL (2026-09-29).
+    # Off unless PHONE_KEXEC_RMTFS_HANDBACK=1, so the modem stays off. (rhodep's
+    # secure world refuses the reassignment, so it is off there too.)
+    if [ "${PHONE_KEXEC_RMTFS_HANDBACK:-0}" = 1 ]; then
+        # Any bound device (negroni's node is memory@..., rhodep's rmtfs@...).
+        for d in /sys/bus/platform/drivers/qcom_rmtfs_mem/*.*; do
+            [ -L "$d" ] || continue
+            echo "$(basename "$d")" > /sys/bus/platform/drivers/qcom_rmtfs_mem/unbind && echo "rmtfs memory returned to Linux ($(basename "$d"))"
+        done
+    fi
+    for r in /sys/class/remoteproc/remoteproc*; do
+        [ -e "$r/state" ] || continue
+        [ "$(cat "$r/state")" = running ] || continue
+        timeout 30 sh -c "echo stop > $r/state" || echo "warning: $(cat "$r/name") did not stop"
+    done
+    for r in /sys/class/remoteproc/remoteproc*; do [ -e "$r/name" ] && echo "$(cat "$r/name")=$(cat "$r/state")"; done; true
+    # The GPI DMA controller keeps its channel state across kexec, and the next
+    # kernel then finds the i2c/spi buses' channels taken. Unbinding the GENI
+    # i2c and spi controllers releases (and resets) their channels first; the
+    # next kernel probes the buses afresh. A node does not need what hangs off
+    # them (touch, NFC, ...) in the last seconds before the jump.
+    for drv in geni_i2c geni_spi spi_geni_qcom; do
+        [ -d "/sys/bus/platform/drivers/$drv" ] || continue
+        for dev in /sys/bus/platform/drivers/$drv/*.i2c /sys/bus/platform/drivers/$drv/*.spi; do
+            [ -e "$dev" ] || continue
+            echo "$(basename "$dev")" > "/sys/bus/platform/drivers/$drv/unbind" 2>/dev/null && echo "released $(basename "$dev")"
+        done
+    done
+    sync
+    # Device setting: how the next kernel's crash or watchdog bite resets the
+    # SoC. The PMIC reset type is set now, on the way into kexec, and lasts
+    # until that kernel reboots normally; warm keeps RAM, so its pstore
+    # record survives a bite. Unset leaves the kernel default (cold); warm
+    # is not safe everywhere (it took negroni down).
+    if [ -n "${PHONE_KEXEC_REBOOT_MODE:-}" ] && [ -w /sys/kernel/reboot/mode ]; then
+        echo "$PHONE_KEXEC_REBOOT_MODE" > /sys/kernel/reboot/mode && echo "reset type for the handover: $PHONE_KEXEC_REBOOT_MODE"
+    fi
+    # Device setting: take the secondary CPUs down here, a moment before the
+    # jump, rather than in the kernel's own last steps, and report how each
+    # went (the PSCI power-off poll). On rhodep a big core sometimes is not
+    # yet off when the next kernel starts it, and then never takes an
+    # interrupt there.
+    if [ "${PHONE_KEXEC_OFFLINE_CPUS:-0}" = 1 ]; then
+        for c in /sys/devices/system/cpu/cpu[1-9]*/online; do
+            [ "$(cat "$c")" = 1 ] && echo 0 > "$c"
+        done
+        sleep "${PHONE_KEXEC_OFFLINE_SETTLE:-1}"
+        dmesg | grep -E "CPU[0-9]+: shutdown|killed \(polled|shut down cleanly" | tail -n 16 || true
+    fi
+    # Device setting: console log level for the last steps of this kernel, so
+    # its CPU shutdown messages ("CPUn killed (polled N ms)", "may not have
+    # shut down cleanly") reach the pstore console the next kernel exposes.
+    if [ -n "${PHONE_KEXEC_CONSOLE_LOGLEVEL:-}" ]; then
+        dmesg -n "$PHONE_KEXEC_CONSOLE_LOGLEVEL" 2>/dev/null || true
+    fi
+    echo "kexec at $(date +%T)"
+    # kexec.target directly rather than `systemctl kexec`: the latter goes
+    # through logind and its inhibitor bookkeeping (see above).
+    systemctl start kexec.target --job-mode=replace-irreversibly --no-block
+    ;;
+fdt-diff)
+    rel=${2:?kernel release}
+    command -v dtc >/dev/null || die "dtc is not installed (device-tree-compiler)"
+    # shellcheck source=/dev/null
+    . /etc/default/phone-bootimg 2>/dev/null || true
+    dtb=/usr/lib/linux-image-$rel/${DTB:-qcom/sm8450-oneplus-negroni.dtb}
+    [ -s "$dtb" ] || die "no $dtb"
+    dtc -q -s -I dtb -O dts /sys/firmware/fdt > "$dir/running.dts"
+    dtc -q -s -I dtb -O dts "$dtb" > "$dir/package.dts"
+    diff -u "$dir/package.dts" "$dir/running.dts" > "$dir/fdt.diff" || true
+    echo "$(grep -c '^[-+][^-+]' "$dir/fdt.diff") changed lines, in $dir/fdt.diff (- package DTB, + what the kernel booted with)"
+    ;;
+slot)
+    for p in boot_a boot_b; do
+        dev=$(readlink -f "/dev/disk/by-partlabel/$p" 2>/dev/null) || continue
+        [ -b "$dev" ] || continue
+        python3 - "/dev/$(lsblk -no PKNAME "$dev")" "$p" <<'EOF'
+import struct, sys
+d = open(sys.argv[1], "rb"); d.seek(4096); hdr = d.read(92)
+lba, n, size = struct.unpack_from("<QII", hdr, 72)
+d.seek(lba * 4096); ent = d.read(n * size)
+for i in range(n):
+    e = ent[i * size:(i + 1) * size]
+    if e[56:128].decode("utf-16le").rstrip("\0") == sys.argv[2]:
+        a = struct.unpack_from("<Q", e, 48)[0] >> 48
+        print(f"{sys.argv[2]}: attr 0x{a:02x} priority={a & 3} active={a >> 2 & 1} "
+              f"retries={a >> 3 & 7} successful={a >> 6 & 1} unbootable={a >> 7 & 1}")
+EOF
+    done
+    echo "running slot: $(running_slot)"
+    ;;
+compare)
+    a=$dir/${2:?first}.txt b=$dir/${3:?second}.txt
+    diff -u <(grep -v -E '^[0-9.]+$' "$a") <(grep -v -E '^[0-9.]+$' "$b") || true
+    echo "## modules only in one of them"
+    diff "$dir/$2.modules" "$dir/$3.modules" || true
+    ;;
+*) sed -n '2,25p' "$0"; exit 2 ;;
+esac

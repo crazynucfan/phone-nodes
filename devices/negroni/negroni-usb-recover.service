@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover USB Ethernet/charging when the PD adapter was powered before boot
+# No After=multi-user.target: k3s-agent (part of multi-user.target) orders
+# itself after this unit, and that would be an ordering cycle.
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+# Give a normal boot 25 s to bring the adapter up on its own.
+ExecStartPre=/bin/sleep 25
+ExecStart=/usr/local/sbin/negroni-usb-recover
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Mark A/B slot b successful for the bootloader
+Documentation=file:/usr/local/sbin/qcom-slot-successful
+After=ssh.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/qcom-slot-successful --apply b
+
+[Install]
+WantedBy=multi-user.target

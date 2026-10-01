@@ -1,0 +1,29 @@
+#! Config the phone's boot path depends on (see negroni/required-config). The
+#! root filesystem is on UFS, so its host and PHY are built in; the USB serial
+#! gadget is the way in when nothing else comes up; the watchdog must be there
+#! before any module loads; Cilium's BPF masquerade needs kernel BTF. The
+#! bootloader rewrites every console= to console=null, which only the null TTY
+#! turns into a console: without one, initramfs-tools cannot open /dev/console
+#! to hand over to systemd and PID 1 dies. The charger (and its charge cap from
+#! the device tree) is on a GENI I2C bus. A kexec'd kernel that wedges must
+#! panic and reboot into the loader (patch 15), and it has to be able to take
+#! over the RPM link the previous kernel left up (patch 14). Without pseudo-NMI
+#! (patch 17, enabled by irqchip.gicv3_pseudo_nmi=1 from the loader) a kexec'd
+#! kernel's CPU 6 sometimes never takes an interrupt.
+CONFIG_LOCALVERSION="-rhodep"
+CONFIG_KEXEC=y
+CONFIG_KEXEC_FILE=y
+CONFIG_ARM_GIC_V3_ITS=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PHY_QCOM_QMP_UFS=y
+CONFIG_ATH10K_SNOC=m|y
+CONFIG_USB_CONFIGFS_ACM=y
+CONFIG_QCOM_WDT=y
+CONFIG_NULL_TTY=y
+CONFIG_I2C_QCOM_GENI=y
+CONFIG_DEBUG_INFO_BTF=y
+# CONFIG_MODVERSIONS is not set
+CONFIG_RPMSG_QCOM_GLINK_RPM=y
+CONFIG_PANIC_TIMEOUT=10
+CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
+CONFIG_ARM64_PSEUDO_NMI=y

@@ -1,0 +1,17 @@
+0001-phy-qcom-qmp-ufs-Add-SM6375-support.patch
+0002-arm64-dts-qcom-sm6375-Add-UFS-nodes.patch
+0003-arm64-dts-qcom-Add-Motorola-moto-g82-5G-rhodep.patch
+0004-arm64-configs-Add-rhodep_defconfig-for-rhodep.patch
+0005-power-supply-bq256xx-Add-SG-Micro-SGM41542.patch
+0006-arm64-dts-qcom-sm6375-motorola-rhodep-Add-the-charge.patch
+0007-arm64-dts-qcom-sm6375-Add-the-APSS-watchdog.patch
+0008-arm64-dts-qcom-sm6375-UFS-without-ICE-correct-remove.patch
+0009-soc-qcom-pd-mapper-Add-SM6375-support.patch
+0010-arm64-dts-qcom-sm6375-Add-CPU-capacities-and-power-c.patch
+0011-power-supply-bq256xx-Enable-charging-at-probe.patch
+0012-bpf-Reject-a-non-scalar-bpf_set_retval-argument-with.patch
+0013-rpmsg-qcom_glink_rpm-Resume-the-FIFOs-where-the-RPM-.patch
+0014-rpmsg-qcom_glink-Take-over-the-RPM-channel-after-a-k.patch
+0015-arm64-rhodep_defconfig-panic-and-reboot-on-lockups.patch
+0016-soc-qcom-rmtfs_mem-Use-a-region-a-previous-kernel-al.patch
+0017-arm64-rhodep_defconfig-pseudo-NMI.patch

@@ -1,0 +1,31 @@
+# /etc/default/phone-boot: read by phone-kexec-loader and phone-kexec-test.
+
+# How the loader tells a bootloader boot from a kexec'd one: a word on the
+# bootloader's kernel command line that phone-kexec-test strips for every
+# kexec'd kernel. negroni's bootloader passes `earlycon` (which faults a
+# kexec'd kernel into EDL anyway); a phone whose bootloader passes nothing
+# suitable gets its own word in its boot image's command line (rhodep uses
+# phone.loader).
+PHONE_BOOT_LOADER_MARK=earlycon
+
+# Words to add to every kexec'd kernel's command line; a word already there is
+# not added twice. rhodep passes irqchip.gicv3_pseudo_nmi=1 here.
+PHONE_KEXEC_ARGS=""
+
+# 1 hands the rmtfs memory back before the jump. Leave it 0 on negroni: with it
+# handed back, the modem boots in the kexec'd kernel and the phone drops to EDL.
+PHONE_KEXEC_RMTFS_HANDBACK=0
+
+# Reboot mode to set before the jump (the kernel's /sys/kernel/reboot/mode):
+# `warm` keeps RAM across the next reset, so the kexec'd kernel's pstore record
+# survives intact. Empty leaves the kernel default (cold). Not safe everywhere:
+# a warm reboot leaves a negroni dead until Power + Volume Up.
+PHONE_KEXEC_REBOOT_MODE=
+
+# Console log level for this kernel's last steps, so its CPU shutdown messages
+# reach the pstore console the next kernel exposes. Empty leaves it alone.
+PHONE_KEXEC_CONSOLE_LOGLEVEL=
+
+# 1 takes the secondary CPUs offline a moment before the jump and logs how
+# each powered off. Never on negroni: CPU hotplug stalls its storage I/O.
+PHONE_KEXEC_OFFLINE_CPUS=0

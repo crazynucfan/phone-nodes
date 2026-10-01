@@ -1,0 +1,10 @@
+#! Config the phone's boot path depends on (see negroni/required-config).
+CONFIG_LOCALVERSION="-apollo"
+CONFIG_KEXEC=y
+CONFIG_KEXEC_FILE=y
+CONFIG_ARM_GIC_V3_ITS=y
+CONFIG_SCSI_UFS_QCOM=y
+CONFIG_PCIE_QCOM=y
+CONFIG_ATH11K_PCI=m|y
+CONFIG_QCOM_WDT=y
+# CONFIG_MODVERSIONS is not set
