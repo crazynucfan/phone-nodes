@@ -80,7 +80,8 @@ How 0013, 0014, 0016 and 0017 were found is in
 ## Loader settings
 
 rhodep's `/etc/default/phone-kexec` sets `FLAVOUR="rhodep"`. Its
-`/etc/default/phone-boot` (see [kexec-loader.md](kexec-loader.md#settings)):
+`/etc/default/phone-boot` (see [kexec-loader.md](kexec-loader.md#settings));
+both files are in `devices/rhodep/examples/`:
 
 ```
 PHONE_BOOT_LOADER_MARK=phone.loader
@@ -116,23 +117,107 @@ left armed and pets it until userspace opens it. A failed launch is reset by
 the watchdog or by a panic. The watchdog counts to 31 s at most.
 `loader/systemd/20-phone-watchdog.conf` sets `RebootWatchdogSec` and
 `KExecWatchdogSec` to 2 min, which this watchdog refuses, and it is then left
-disarmed. On rhodep a later drop-in in `/etc/systemd/system.conf.d/` sets both
-to 30 s.
+disarmed. On rhodep a later drop-in, `devices/rhodep/21-phone-watchdog-cap.conf`
+(for `/etc/systemd/system.conf.d/`), sets both to 30 s. Without it a launch
+that hangs waits for the power button.
 
-## Bootloader and USB
+The boot image hook (`loader/zz-phone-bootimg`) is not used on rhodep, because
+its boot images need the fixups described below. `/etc/default/phone-bootimg`
+holds only `DTB=`, which `phone-kexec-test` reads to find the kernel package's
+device tree (`devices/rhodep/examples/phone-bootimg`).
+
+## Bootloader
+
+Motorola's bootloader (MBM-3.0, Qualcomm's ABL with additions) checks more
+than upstream's does. A missing piece gives a boot loop or a `DXE_ASSERT`. The
+bootloader writes a log of each failed boot to the `logfs` partition, one
+`LogNN.txt` per boot. The partition is FAT16 with 4 KiB sectors and is
+readable with root on stock Android. Its FAT chains are not maintained, so the
+files have to be read as contiguous runs. This list comes from those logs:
+
+- **Header v3, DTB in `vendor_boot`.** That is what this series uses, with the
+  kernel, ramdisk and command line in `boot`. Other ports of this phone boot
+  header v2 images with a flat `Image` and the DTB appended. A v2 image with a
+  gzip'd kernel reset the phone here, and v2 was not pursued. The rest of the
+  list is about the v3 path.
+- **The DTB is matched on `qcom,msm-id` and on its root `model`.** The model
+  has to be the stock `"Qualcomm Technologies, Inc. Blair "`, with the trailing
+  space. The kernel's device tree keeps its own values, so the image is packed
+  with a copy that has the stock model, both stock msm-ids
+  (`<0x1fb 0x10000 0x242 0x10000>`), `qcom,blair` added to the compatible and
+  an empty `channel-id-map` property, as the stock DTB has. The stock
+  `vendor_boot` carries a second, small DTB after the SoC one; it is appended
+  again.
+- **A `dtbo` entry must match the board.** A zeroed `dtbo` is refused ("Board
+  Dtbo blob not found"). The bootloader's overlay code wants `__symbols__` in
+  the base DTB (the series builds the device tree with `-@`) and `__fixups__`
+  in the overlay. A no-op overlay per stock entry, with the stock entry's
+  matching properties copied, is enough.
+- **The matching entry's root properties replace the DTB's.** The bootloader
+  copies the entry's `model` and `compatible` over the SoC DTB's. The no-op
+  overlays therefore put `motorola,rhodep` and `qcom,sm6375` in front of the
+  stock compatibles. Drivers that match device nodes are not affected, but
+  code that matches the machine compatible is: without `qcom,sm6375` the
+  in-kernel pd-mapper does not start the WLAN protection domain, and there is
+  no `wlan0`.
+- **The vendor command line must contain `console=` and
+  `androidboot.console=`.** Without `console=` the bootloader asserts
+  (`DXE_ASSERT` at `boota:786`). It rewrites them to `console=null`, which is
+  why the series builds in the null TTY.
+- **The vendor ramdisk must be an empty cpio.** With the stock one in front,
+  the initramfs fails to unpack.
+- **`vbmeta` is built with flags 2** (verification disabled). Give it a
+  rollback index no lower than the one the installed firmware stored, or
+  flashing warns of an anti-rollback downgrade. `avbtool info_image` on the
+  stock `vbmeta` shows it; it was 29 on firmware T1SUS33.1-124-6-16.
+
+Packing needs the owner's own stock `vendor_boot` and `dtbo` images. This
+repository has no script for it yet.
+
+Other things to know:
 
 - `fastboot boot` works, so a kernel can be tried from RAM before anything is
-  flashed.
-- The phone is A/B. As on negroni, Linux has to mark its slot successful, or
-  the bootloader's retries run out and it falls back to the slot with stock
-  Android. `loader/qcom-slot-successful` and
-  `loader/systemd/mark-slot-successful.service` do that for slot b on every
-  boot.
-- With no Type-C driver, nothing picks the port's role, and the USB
-  controller comes up as a peripheral. A unit writes `host` to
-  `/sys/class/usb_role/*/role` at boot. A USB Ethernet adapter with power
-  pass-through and a charger behind it then gives network and power on one
-  cable, without PD.
+  flashed. Fastboot is Volume Down + Power. From Linux,
+  `systemctl reboot --reboot-argument=bootloader` gets there without buttons:
+  the bootloader reads the reboot reason from the PM6125 PON register, which
+  upstream's `qcom-pon` writes.
+- The phone is A/B. Stock Android stays on slot a and Linux goes on slot b.
+  The slot state is in the GPT attribute bits of `boot_b` (priority 48–49,
+  active 50, retry count 51–53, successful 54, unbootable 55).
+  `fastboot --set-active` resets the slot to 7 tries, not successful. At 0 the
+  bootloader is expected to fall back to slot a; that was never allowed to
+  happen here. `loader/qcom-slot-successful` and
+  `loader/systemd/mark-slot-successful.service` set the successful bit on
+  every boot. They change only that bit, in the primary and backup tables.
+- The panel keeps showing the simple framebuffer (the kernel log) only with
+  `clk_ignore_unused pd_ignore_unused regulator_ignore_unused` on the command
+  line. Without `regulator_ignore_unused` the image froze when REFGEN was
+  turned off.
+
+## USB
+
+With no Type-C driver, nothing picks the port's role, and the USB controller
+comes up as a peripheral. That is what bring-up wants: a USB gadget to log in
+over. To run on a USB Ethernet adapter instead,
+`devices/rhodep/phone-usb-role.service` writes `host` to
+`/sys/class/usb_role/*/role` at boot. An adapter with power pass-through and a
+charger behind it then gives network and power on one cable, without PD.
+
+## Modem file system
+
+The modem writes to its remote file system through `tqftpserv`, which serves
+`/tmp/tqftpserv`. postmarketOS's `msm-firmware-loader` links that directory to
+the modem's area on the read-only `persist` partition, and the modem then
+retries one write every second, forever. `devices/rhodep/tqftpserv-rw` (with
+its unit) mounts an overlay there: reads come from `persist`, writes stay in
+`/var/lib/tqftpserv`, and `persist` is never written.
+
+## node_exporter
+
+The hwmon collector reads the Wi-Fi chip's temperature, which the WCN3990
+firmware never answers, so ath10k waits out its 5 s timeout on every scrape.
+`devices/rhodep/examples/prometheus-node-exporter` leaves that chip out. A
+scrape went from 5.3 s to 0.44 s.
 
 ## UFS clock scaling off
 
@@ -142,10 +227,20 @@ scaling: `ufshcd_clock_scaling_prepare()` quiesces the tag set and then takes
 `clk_scaling_lock` for write, while the query from `ufshcd_rtc_work` holds the
 read lock and waits on the quiesced queue.
 
-Clock scaling is now turned off at every boot with a tmpfiles rule. It is the
-one in `devices/negroni/tmpfiles/phone-ufs-clkscale.conf`, with rhodep's UFS
-host in the path:
+Clock scaling is now turned off at every boot with a tmpfiles rule,
+`devices/rhodep/tmpfiles/phone-ufs-clkscale.conf`:
 
 ```
 w /sys/bus/platform/devices/4804000.ufshc/clkscale_enable - - - - 0
 ```
+
+The deadlock was seen once, on 2026-10-01, and scaling has been off since.
+The rule has no long soak behind it yet.
+
+## Not proven yet
+
+- The loader kernel on the phone is still a build of patches 0001–0012. A
+  cold boot of a kernel with 0013–0017 as the loader kernel is untested.
+- Why pseudo-NMI stops the CPU 6 hang is a hypothesis. The result is what was
+  measured: no hang in 36 launches.
+- There is no fuel gauge driver, so Linux reports no charge percentage.

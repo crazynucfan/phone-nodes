@@ -30,6 +30,12 @@ devices/negroni/     negroni's USB Ethernet recovery and charge limit
 devices/negroni/tmpfiles/
                      tmpfiles.d rules: UFS clock scaling off, and a fix for
                      node_exporter's CPU frequency metrics
+devices/rhodep/      rhodep's modem file system overlay, USB host role unit
+                     and watchdog timeout cap
+devices/rhodep/tmpfiles/
+                     tmpfiles.d rule: UFS clock scaling off
+devices/rhodep/examples/
+                     rhodep's /etc/default/* files
 docs/                how it works and what we learned
 ```
 

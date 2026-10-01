@@ -1,0 +1,15 @@
+[Unit]
+Description=Put the USB-C port in host mode
+# rhodep's Type-C logic (SGM7220) has no driver, so nothing else picks the
+# role: dwc3 comes up as a peripheral (the bring-up gadget) until told.
+Before=network-pre.target
+Wants=network-pre.target
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for r in /sys/class/usb_role/*/role; do [ -e "$r" ] && echo host > "$r"; done'
+
+[Install]
+WantedBy=multi-user.target

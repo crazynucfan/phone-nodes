@@ -1,0 +1,5 @@
+# /etc/default/prometheus-node-exporter on rhodep (Debian's node_exporter).
+# The hwmon collector reads the Wi-Fi chip's temperature, which the WCN3990
+# firmware never answers: ath10k waits out its 5 s timeout on every scrape.
+# Leaving that chip out took a scrape from 5.3 s to 0.44 s.
+ARGS="--collector.hwmon.chip-exclude=^soc_0_c800000_wifi$"

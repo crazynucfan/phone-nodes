@@ -1,0 +1,23 @@
+# /etc/default/phone-boot on rhodep: read by phone-kexec-loader and
+# phone-kexec-test. loader/examples/phone-boot explains each setting;
+# docs/rhodep.md says why rhodep has these values.
+
+# The bootloader passes nothing a kexec'd kernel would lack, so the boot
+# image's command line carries this word as the marker.
+PHONE_BOOT_LOADER_MARK=phone.loader
+
+# The boot image's command line has no panic timeout. The watchdog is still
+# running across the kexec; the kernel stops petting it after 180 s if
+# userspace has not taken it over. The pseudo-NMI needs patch 0017.
+PHONE_KEXEC_ARGS="panic=10 softlockup_panic=1 watchdog.open_timeout=180 irqchip.gicv3_pseudo_nmi=1"
+
+# The secure world refuses to assign the rmtfs region again; patch 0016
+# handles it in the kernel.
+PHONE_KEXEC_RMTFS_HANDBACK=0
+
+# A warm reset keeps RAM through a watchdog bite, so a failed launch leaves
+# its pstore record.
+PHONE_KEXEC_REBOOT_MODE=warm
+
+PHONE_KEXEC_CONSOLE_LOGLEVEL=
+PHONE_KEXEC_OFFLINE_CPUS=0

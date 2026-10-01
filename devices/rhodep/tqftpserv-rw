@@ -1,0 +1,16 @@
+#!/bin/sh
+# Give the modem a writable remote file system. tqftpserv serves
+# /tmp/tqftpserv, which msm-firmware-loader links to the modem's area on the
+# read-only persist partition; the modem then retries a write
+# (server_check.txt) every second for ever. Overlay that area with a
+# directory on the root filesystem instead: reads come from persist, writes
+# stay in /var/lib/tqftpserv and persist itself is never written.
+set -eu
+lower=/lib/firmware/msm-firmware-loader/mnt/persist/rfs/msm/mpss
+state=/var/lib/tqftpserv
+[ -d "$lower" ] || { echo "tqftpserv-rw: no $lower, leaving /tmp/tqftpserv alone"; exit 0; }
+mountpoint -q /tmp/tqftpserv && exit 0
+mkdir -p "$state/upper" "$state/work"
+[ -L /tmp/tqftpserv ] && rm /tmp/tqftpserv
+mkdir -p /tmp/tqftpserv
+mount -t overlay overlay -o "lowerdir=$lower,upperdir=$state/upper,workdir=$state/work" /tmp/tqftpserv

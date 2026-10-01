@@ -1,0 +1,10 @@
+[Unit]
+Description=Writable overlay for the modem's remote file system (tqftpserv)
+After=msm-firmware-loader.service
+Before=tqftpserv.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tqftpserv-rw
+[Install]
+WantedBy=tqftpserv.service
