@@ -98,6 +98,15 @@ The rhodep patches are written for this series. What they build on:
 - The [MobileLinux](https://github.com/d4rks1d33/MobileLinux) rhodep port was
   consulted along the way.
 
+## Firmware loader
+
+`third-party/msm-firmware-loader/` is postmarketOS's
+[msm-firmware-loader](https://gitlab.postmarketos.org/postmarketOS/msm-firmware-loader)
+by Nikita Travkin (MIT), with the changes carried in
+[withsalt/oneplus-negroni-arch-linux](https://github.com/withsalt/oneplus-negroni-arch-linux)
+and two made here. Its README lists them, and both licence texts are in that
+directory.
+
 ## Upstream
 
 Everything else is Linux itself, and the series only make sense on top of

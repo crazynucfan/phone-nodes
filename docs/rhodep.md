@@ -211,8 +211,9 @@ charger behind it then gives network and power on one cable, without PD.
 ## Modem file system
 
 The modem writes to its remote file system through `tqftpserv`, which serves
-`/tmp/tqftpserv`. postmarketOS's `msm-firmware-loader` links that directory to
-the modem's area on the read-only `persist` partition, and the modem then
+`/tmp/tqftpserv`. The firmware loader (`third-party/msm-firmware-loader/`, a
+modified copy of postmarketOS's) links that directory to the modem's area on
+the read-only `persist` partition, and the modem then
 retries one write every second, forever. `devices/rhodep/tqftpserv-rw` (with
 its unit) mounts an overlay there: reads come from `persist`, writes stay in
 `/var/lib/tqftpserv`, and `persist` is never written.

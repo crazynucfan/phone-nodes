@@ -28,7 +28,8 @@ built from a DTB with the node would hit the same.
 - The bootloader refuses `fastboot boot` (RAM boot). Every test kernel has to
   be flashed, which is why the kexec loader exists.
 - No firmware is included here. The DSP and Wi-Fi firmware is loaded from the
-  phone's own partitions at boot.
+  phone's own partitions at boot, by the scripts in
+  `third-party/msm-firmware-loader/`.
 
 ## Keep the boot slot marked successful
 

@@ -37,6 +37,9 @@ devices/rhodep/tmpfiles/
                      tmpfiles.d rule: UFS clock scaling off
 devices/rhodep/examples/
                      rhodep's /etc/default/* files
+third-party/msm-firmware-loader/
+                     postmarketOS's firmware loader as these phones run it
+                     (MIT and Apache-2.0, not GPL; see its README)
 docs/                how it works and what we learned
 ```
 
@@ -107,3 +110,7 @@ GPL-2.0-only; see [LICENSE](LICENSE). The kernel patches are derived from the
 Linux kernel and from the community forks named in [CREDITS.md](CREDITS.md),
 and every file keeps its original copyright and licence notices. The tooling in
 `loader/`, `devices/` and `kernel/scripts/` is GPL-2.0-only as well.
+
+The exception is `third-party/msm-firmware-loader/`, a modified copy of an
+MIT-licensed project. Its README says where each file comes from and what was
+changed, and its two licence files apply to it.

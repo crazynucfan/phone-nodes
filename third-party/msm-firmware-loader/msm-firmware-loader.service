@@ -1,0 +1,13 @@
+[Unit]
+Description=Load firmware that is located on dedicated partitions of qcom devices
+Before=systemd-udevd.service
+DefaultDependencies=no
+RequiresMountsFor=/sys /dev
+
+[Service]
+ExecStart=/usr/local/sbin/msm-firmware-loader.sh
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

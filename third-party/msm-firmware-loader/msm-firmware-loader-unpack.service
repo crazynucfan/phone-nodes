@@ -1,0 +1,11 @@
+[Unit]
+Description=Unpack dynamically loaded firmware
+Before=rmtfs.service
+
+[Service]
+ExecStart=/usr/local/sbin/msm-firmware-loader-unpack.sh
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
