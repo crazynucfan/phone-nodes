@@ -171,8 +171,13 @@ files have to be read as contiguous runs. This list comes from those logs:
   flashing warns of an anti-rollback downgrade. `avbtool info_image` on the
   stock `vbmeta` shows it; it was 29 on firmware T1SUS33.1-124-6-16.
 
-Packing needs the owner's own stock `vendor_boot` and `dtbo` images. This
-repository has no script for it yet.
+`devices/rhodep/pack-bootimg.sh` packs `boot.img`, `vendor_boot.img`,
+`dtbo.img` and `vbmeta.img` this way from a kernel, its DTB and an initramfs.
+It needs the stock `vendor_boot` and `dtbo` images read from your own phone
+(they are only read, and are not in this repository), and AOSP's `mkbootimg`
+and `avbtool`. `devices/rhodep/flash-slot.sh` writes the result to one slot
+with fastboot and switches to it. The other slot keeps stock Android. Back up
+the slot's stock partitions first; the script does not.
 
 Other things to know:
 
@@ -244,3 +249,9 @@ The rule has no long soak behind it yet.
 - Why pseudo-NMI stops the CPU 6 hang is a hypothesis. The result is what was
   measured: no hang in 36 launches.
 - There is no fuel gauge driver, so Linux reports no charge percentage.
+- `pack-bootimg.sh` reproduces the images running on the phone byte for byte,
+  except `dtbo.img`: the flashed one was built with another name for the empty
+  property its overlays add (`NOOP_PROPERTY`). The name is arbitrary, but a
+  `dtbo.img` with the default name has not been flashed.
+- `flash-slot.sh` runs the command sequence that flashed the phone. The script
+  as published has not been run against a phone.
