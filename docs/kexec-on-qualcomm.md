@@ -85,9 +85,9 @@ that the bootloader's tree does not describe may not be the kernel's to use,
 so try it with someone at the phone.
 
 **Where the watchdog works, mind its range.** rhodep's tree describes the APSS
-watchdog, and `qcom_wdt` takes over the one the bootloader leaves running.
-systemd's `KExecWatchdogSec` deliberately keeps it running across the jump, so
-a kexec'd kernel that hangs is reset. Two settings matter. The watchdog counts
+watchdog. systemd on the loader kernel arms it, `KExecWatchdogSec` deliberately
+keeps it armed across the jump, and the next kernel's `qcom_wdt` takes over the
+watchdog the loader left armed, so a kexec'd kernel that hangs is reset. Two settings matter. The watchdog counts
 to 31 s at most: a 2 min `RebootWatchdogSec` or `KExecWatchdogSec` fails and
 leaves it disarmed, and 30 s works. And the new kernel pets the watchdog it
 inherits until userspace opens it. `watchdog.open_timeout=180` on the kexec'd

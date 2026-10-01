@@ -109,9 +109,11 @@ PHONE_KEXEC_RMTFS_HANDBACK=0
 - **No LPI tables.** SM6375 has no GIC ITS, so there are no tables to reserve,
   and `phone-kexec-dtb` passes the running device tree through unchanged.
 
-Unlike negroni's, rhodep's APSS watchdog is usable: `qcom_wdt` takes over the
-watchdog the bootloader leaves running. A failed launch is reset by the
-watchdog or by a panic. The watchdog counts to 31 s at most.
+Unlike negroni's, rhodep's APSS watchdog is usable. systemd on the loader
+kernel arms it and keeps it armed for the jump, and the driver does not stop it
+on a kexec, so the next kernel's `qcom_wdt` takes over the watchdog the loader
+left armed and pets it until userspace opens it. A failed launch is reset by
+the watchdog or by a panic. The watchdog counts to 31 s at most.
 `loader/systemd/20-phone-watchdog.conf` sets `RebootWatchdogSec` and
 `KExecWatchdogSec` to 2 min, which this watchdog refuses, and it is then left
 disarmed. On rhodep a later drop-in in `/etc/systemd/system.conf.d/` sets both
