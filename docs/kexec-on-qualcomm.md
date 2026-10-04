@@ -126,6 +126,13 @@ inherits until userspace opens it. `watchdog.open_timeout=180` on the kexec'd
 command line ends that after 180 s, so a kernel stuck before userspace is
 reset too.
 
+**And check that it bites at all.** On apollo (SM8250) systemd arms `qcom_wdt`
+with a 30 s timeout, yet with every CPU locked for about 15 minutes
+(`test_lockup all_cpus=1 disable_irq=1`, lockup panics off) nothing reset the
+phone. There the lockup detectors' panic is the only automatic way back.
+Drill it with someone at the phone: freezing PID 1 is no test, since the
+kernel drops `SIGSTOP` to init.
+
 ## RPM-based SoCs (SM6375)
 
 **A hard reset about 0.13 s into every kexec'd kernel,** around the SPMI

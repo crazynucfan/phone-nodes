@@ -93,10 +93,14 @@ PHONE_KEXEC_DISPLAY_OFF=1
   none of the DSPs (charging, the fuel gauge and USB-C are kernel drivers),
   the series' kernels have no DSP firmware, and on the loader kernel the
   sensor DSP crash-looped.
-- **The watchdog.** `qcom_wdt` starts at a 30 s timeout here;
-  `devices/apollo/21-phone-watchdog-cap.conf` caps systemd's reboot and kexec
-  watchdog timeouts at 30 s, as on rhodep, and `watchdog.open_timeout=180`
-  stops the kexec'd kernel petting it if userspace never takes over.
+- **The watchdog does not reset this phone.** `qcom_wdt` starts at a 30 s
+  timeout, and systemd arms it (`devices/apollo/21-phone-watchdog-cap.conf`
+  caps the reboot and kexec timeouts at 30 s, as on rhodep). But in a drill
+  with every CPU locked by `test_lockup` (`all_cpus=1 disable_irq=1`, lockup
+  panics off), nothing petted it for about 15 minutes and nothing reset the
+  SoC. What brings a hung apollo back is the series' lockup detectors: they
+  panic, and the panic reboots warm into the loader. The watchdog settings
+  are harmless, not a safety net.
 
 A kexec by hand from one of the series' kernels straight into another left the
 USB adapter unenumerated and Wi-Fi unreachable. The loader never does that: it
@@ -161,8 +165,8 @@ over a page, and the kernel answers EFBIG).
 
 ## Not proven yet
 
-- A watchdog bite on this phone has not been drilled: systemd arms the APSS
-  watchdog, but what a bite does here (warm reset into the bootloader, or
-  something worse) has not been seen.
+- A hang that also stops the lockup detectors (every CPU stuck with
+  interrupts off, and no other CPU left to notice) has nothing to reset it:
+  the watchdog does not (above), so the phone stays hung until Power is held.
 - The loader kernel's own lockup handling: it is postmarketOS's configuration,
   without the series' panic options.
