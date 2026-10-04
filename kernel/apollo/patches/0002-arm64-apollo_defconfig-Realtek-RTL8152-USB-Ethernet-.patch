@@ -1,0 +1,37 @@
+From 94479dfce5814f7bcc23e8691c400f5b4add5a5e Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 17:57:31 +0100
+Subject: [PATCH] arm64: apollo_defconfig: Realtek RTL8152 USB Ethernet driver
+
+Without CONFIG_USB_RTL8152 an RTL8153 adapter binds to r8153_ecm, the
+chip's CDC ECM configuration. In that mode the chip's receive filter
+keeps the adapter's own MAC: an address set from Linux (a systemd .link
+MACAddress=, which the node setup uses for a stable DHCP identity) is
+never programmed into the chip, so every unicast frame to it is dropped,
+promiscuous mode or not. DHCP and ARP replies to broadcasts still work,
+which makes the failure look like a routing problem.
+
+r8152 switches the adapter to its vendor configuration and programs the
+MAC into the chip, as on negroni and rhodep. r8153_ecm stays built for
+adapters r8152 does not claim.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/configs/apollo_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/configs/apollo_defconfig b/arch/arm64/configs/apollo_defconfig
+index f842b341f..db6cff3f4 100644
+--- a/arch/arm64/configs/apollo_defconfig
++++ b/arch/arm64/configs/apollo_defconfig
+@@ -579,6 +579,7 @@ CONFIG_MDIO_BUS_MUX_MULTIPLEXER=y
+ CONFIG_MDIO_BUS_MUX_MMIOREG=y
+ CONFIG_USB_PEGASUS=m
+ CONFIG_USB_RTL8150=m
++CONFIG_USB_RTL8152=m
+ CONFIG_USB_USBNET=m
+ CONFIG_USB_NET_DM9601=m
+ CONFIG_USB_NET_SR9800=m
+-- 
+2.53.0
+

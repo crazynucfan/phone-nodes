@@ -155,11 +155,12 @@ load)
         pkg_dtb=/usr/lib/linux-image-$what/${DTB:-qcom/sm8450-oneplus-negroni.dtb}
     fi
     # A failure here must stop the load (set -e), never fall back to a stale tree.
-    dtb_report=$(phone-kexec-dtb "$dir/kexec.dtb" $pkg_dtb)
+    # PHONE_KEXEC_DTB_BASE (phone-boot): the running tree, or the package's.
+    dtb_report=$(PHONE_KEXEC_DTB_BASE="${PHONE_KEXEC_DTB_BASE:-running}" phone-kexec-dtb "$dir/kexec.dtb" $pkg_dtb)
     grep -i 'carried' <<< "$dtb_report" || true
     echo "staging $kernel with $initrd"
     echo "command line: $cmdline"
-    echo "device tree: $dir/kexec.dtb (running fdt, plus GIC LPI table reservations where the SoC has them)"
+    echo "device tree: $(head -n 1 <<< "$dtb_report")"
     # Classic kexec_load (-c): kexec-tools places the segments low in RAM, away
     # from the LPI tables at the start of the upper bank; kexec_file_load would
     # put the initrd right on top of them.
@@ -190,9 +191,24 @@ go)
     # Only what is running: stopping a unit that has not started yet cancels its
     # start job, and when go runs from the loader early in boot and fails, the
     # boot carries on without it.
-    for u in phone-metrics.timer phone-metrics.service negroni-charge-limit.service; do
+    for u in phone-metrics.timer phone-metrics.service negroni-charge-limit.service apollo-charge-limit.service; do
         if systemctl is-active --quiet "$u"; then systemctl stop "$u"; fi
     done
+    # Device setting: switch the display off first. On apollo the jump reset
+    # the phone whenever the panel was on (the display engine still scanning
+    # out through the SMMU while the next kernel takes the memory and the SMMU
+    # over), and worked every time console blanking had turned it off
+    # (2026-10-04). Blanking the framebuffer turns the CRTC off through DRM, as
+    # console blanking does; nothing unblanks it before the jump.
+    if [ "${PHONE_KEXEC_DISPLAY_OFF:-0}" = 1 ]; then
+        for b in /sys/class/graphics/fb*/blank; do
+            [ -e "$b" ] && { echo 4 > "$b" 2>/dev/null || echo "warning: could not blank ${b%/blank}"; }
+        done
+        sleep 1
+        for c in /sys/class/drm/card*-*/dpms; do
+            [ -e "$c" ] && [ "$(cat "${c%/dpms}/enabled" 2>/dev/null)" = enabled ] && echo "$(basename "${c%/dpms}"): dpms $(cat "$c")"
+        done
+    fi
     # The DSPs keep running across kexec otherwise (no shutdown hook); the modem
     # first, and give its rmtfs memory back so the next kernel can assign it.
     # Early in boot (the loader) the DSP drivers are not loaded yet: no

@@ -43,9 +43,10 @@ RUN bash /phone-kernel/scripts/fetch.sh "${DEVICE}" /src
 FROM source AS build
 ARG DEVICE=negroni
 ARG BUILD_ID=local
-# DISTCC_POOL=<dns name>[/<jobs per server>] spreads the compiling over the
-# distcc servers that name resolves to (see build.sh). Unset, or when none
-# answers with the same compiler, everything compiles here.
+# DISTCC_POOL=<dns name>[,<dns name>...][/<jobs per server>] spreads the
+# compiling over the distcc servers the first name with a usable server
+# resolves to (see build.sh). Unset, or when none answers with the same
+# compiler, everything compiles here.
 ARG DISTCC_POOL=
 # The ccache lives in a BuildKit cache mount, so it survives between builds on
 # the same daemon without ever landing in a layer. build.sh applies the series

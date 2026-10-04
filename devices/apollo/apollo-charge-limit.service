@@ -1,0 +1,19 @@
+[Unit]
+Description=Maintain the Xiaomi Mi 10T Pro (apollo) battery charge limit
+After=local-fs.target systemd-udevd.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/libexec/apollo-charge-limit run
+# Charging back on whenever the service stops, however it stops.
+ExecStopPost=/usr/local/libexec/apollo-charge-limit enable
+TimeoutStartSec=75
+TimeoutStopSec=20
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

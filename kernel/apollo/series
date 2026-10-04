@@ -1,1 +1,5 @@
 0001-arm64-qcom-sm8250-Xiaomi-Mi-10T-Pro-apollo-support-f.patch
+0002-arm64-apollo_defconfig-Realtek-RTL8152-USB-Ethernet-.patch
+0003-bpf-Reject-a-non-scalar-bpf_set_retval-argument-with.patch
+0004-arm64-apollo_defconfig-panic-and-reboot-on-lockups.patch
+0005-arm64-apollo_defconfig-nftables-fib-for-the-inet-fam.patch

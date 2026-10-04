@@ -29,3 +29,15 @@ PHONE_KEXEC_CONSOLE_LOGLEVEL=
 # 1 takes the secondary CPUs offline a moment before the jump and logs how
 # each powered off. Never on negroni: CPU hotplug stalls its storage I/O.
 PHONE_KEXEC_OFFLINE_CPUS=0
+
+# The device tree the kexec'd kernel gets: running (the tree the bootloader
+# passed, as booted) or package (the kernel package's DTB, with the running
+# tree's memory nodes copied in). package is for a phone whose boot partition
+# kernel is older than the kernels it kexecs (apollo: a 7.1 tree under 7.2
+# kernels). It needs DTB in /etc/default/phone-bootimg.
+PHONE_KEXEC_DTB_BASE=running
+
+# 1 blanks the framebuffers before the jump, which turns the display off
+# through DRM. For a loader kernel that drives the panel (apollo): a jump with
+# the panel on reset that phone every time.
+PHONE_KEXEC_DISPLAY_OFF=0

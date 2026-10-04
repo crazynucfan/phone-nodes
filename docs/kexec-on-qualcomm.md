@@ -2,7 +2,7 @@
 # kexec on Qualcomm phones: what it took
 
 These are the problems we hit getting mainline kernels to kexec reliably on a
-negroni (SM8450) and a rhodep (SM6375). Each entry gives the symptom,
+negroni (SM8450), a rhodep (SM6375) and an apollo (SM8250). Each entry gives the symptom,
 the cause as far as we established it, and what `loader/phone-kexec-test` and
 `loader/phone-kexec-dtb` now do about it. There was no UART; most of this came
 from photos of the panel's console and from bisecting.
@@ -36,6 +36,38 @@ the modem and Wi-Fi come up in the kexec'd kernel.
 **Stop the other DSPs too**, through `/sys/class/remoteproc/*/state`. When the
 loader runs at boot their modules may not be loaded yet, so every glob is
 guarded. An empty glob killed the first loader run.
+
+**Or never start them.** apollo's loader kernel has its DSP firmware built in
+and boots the DSPs ~3.5 s into boot, so they are running, or still starting,
+when the loader jumps. A node needs none of them there, so `qcom_q6v5_pas` is
+never loaded (`devices/apollo/apollo-no-dsp.conf`), and the loader jumps from
+a kernel with no DSP at all, which is what it was designed around.
+
+## The display (SM8250)
+
+**A jump with the panel on resets the phone.** apollo's loader kernel has the
+msm display driver built in and the console on the panel. Every kexec while
+the panel was lit reset the phone at once: nothing in pstore, no shutdown in
+the journal. Every kexec after console blanking had turned it off worked. The
+cause is most likely the display engine still scanning out through the SMMU
+while the next kernel takes the memory and the SMMU over. *Fix:*
+`PHONE_KEXEC_DISPLAY_OFF=1`: `phone-kexec-test go` first writes 4 (power down)
+to `/sys/class/graphics/fb*/blank`, which turns the CRTC off through DRM, as
+console blanking does. negroni and rhodep do not need it.
+
+## An older device tree under newer kernels
+
+**The loader kernel's tree is not the kexec'd kernel's.** On negroni and
+rhodep the loader kernel is built from the same series, so the running tree
+(the bootloader's, with its fixups) suits the kexec'd kernel. apollo's loader
+kernel is a 7.1 build; the series' 7.2 tree differs in the PCIe `iommu-map`
+cells and moved the USB-C VBUS supply to the connector node. *Fix:*
+`PHONE_KEXEC_DTB_BASE=package`: `phone-kexec-dtb` starts from the kernel
+package's DTB and copies in the running tree's memory nodes, the one fixup
+the new kernel needs (kexec writes `/chosen`). `phone-kexec-test fdt-diff
+<release>` shows what differs. Xiaomi's bootloader-modified tree also
+defeats `fdtget -l /`, which stops after the first two root nodes, so the
+memory nodes are found through `/proc/device-tree`.
 
 ## Serial engines
 

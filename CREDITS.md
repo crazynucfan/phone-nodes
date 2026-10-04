@@ -40,7 +40,10 @@ linux-mdss-dsi-panel-driver-generator from the vendor device tree.
 Patch 0001 is royka1's
 [postmarketOS port](https://gitlab.postmarketos.org/royka1/linux) branch
 `apollo-7.1` at `71aebd11db5d`, reduced to what the node configuration
-compiles and rebased onto v7.2.8.
+compiles and rebased onto v7.2 (now v7.2.9). Patches 0002 to 0005 are written
+for this series: 0003 is rhodep's 0012, and the others are `apollo_defconfig`
+options. The loader kernel an apollo keeps in its boot partition is
+royka1's branch itself, built with postmarketOS's configuration.
 
 Authors of the 215 commits that branch adds to v7.1, by commit count:
 

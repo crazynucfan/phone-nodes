@@ -1,0 +1,147 @@
+#!/usr/bin/python3
+"""Keep apollo's battery between START_THRESHOLD and END_THRESHOLD.
+
+The PMIC charger has no charge thresholds, only charging_enabled: switch it
+off at END_THRESHOLD and back on at START_THRESHOLD. With charging off the
+phone runs from USB (battery current about 0 on apollo, 2026-10-04), so the
+battery holds its charge. On exit charging is switched back on: a stopped or
+failed service must never leave a node that cannot charge.
+"""
+import argparse
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import sys
+import threading
+import time
+
+BATTERY = Path("/sys/class/power_supply/qcom-battery")
+# The CI kernels name the charger pm8150b-charger, royka1's kernel pm8150b_charger.
+CHARGERS = (Path("/sys/class/power_supply/pm8150b-charger"),
+            Path("/sys/class/power_supply/pm8150b_charger"))
+CONFIG = Path("/etc/apollo-charge-limit.conf")
+
+
+def read_config(path):
+    values = {"START_THRESHOLD": 75, "END_THRESHOLD": 80}
+    seen = set()
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = re.fullmatch(r"(START_THRESHOLD|END_THRESHOLD)\s*=\s*([0-9]{1,3})", line)
+        if not match or match[1] in seen:
+            raise ValueError(f"{path}:{number}: invalid or duplicate setting")
+        seen.add(match[1])
+        values[match[1]] = int(match[2], 10)
+    start, end = values["START_THRESHOLD"], values["END_THRESHOLD"]
+    if not 0 <= start < end <= 100:
+        raise ValueError("thresholds must satisfy 0 <= START_THRESHOLD < END_THRESHOLD <= 100")
+    return start, end
+
+
+def charger():
+    for path in CHARGERS:
+        if (path / "charging_enabled").exists():
+            return path
+    raise FileNotFoundError("no charger with charging_enabled")
+
+
+def read(path, name):
+    return (path / name).read_text().strip()
+
+
+def write(path, name, value):
+    # r+ prevents accidentally creating a fake sysfs control on an old kernel.
+    with (path / name).open("r+") as stream:
+        stream.write(f"{value}\n")
+        stream.flush()
+
+
+def apply(start, end):
+    chg = charger()
+    capacity = int(read(BATTERY, "capacity"))
+    enabled = read(chg, "charging_enabled")
+    if capacity >= end:
+        want = "0"
+    elif capacity <= start:
+        want = "1"
+    else:
+        want = enabled
+    if want != enabled:
+        write(chg, "charging_enabled", want)
+        if read(chg, "charging_enabled") != want:
+            raise OSError(f"charging_enabled did not take {want}")
+    return capacity, want
+
+
+def enable():
+    try:
+        write(charger(), "charging_enabled", 1)
+    except FileNotFoundError:
+        return
+
+
+def notify(message):
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.sendto(message.encode(), address)
+
+
+def run(config, stop, interval=5, startup_timeout=60):
+    ready = False
+    previous = None
+    deadline = time.monotonic() + startup_timeout
+    try:
+        start, end = read_config(config)
+        while not stop.is_set():
+            try:
+                capacity, enabled = apply(start, end)
+                state = "charging" if enabled == "1" else "holding (charging off)"
+                message = f"Start {start}%, stop {end}%: {capacity}%, {state}"
+                if not ready:
+                    notify("READY=1")
+                    ready = True
+            except (OSError, ValueError) as exc:
+                message = f"Waiting for the charger: {exc}"
+                if not ready and time.monotonic() >= deadline:
+                    raise RuntimeError(message) from exc
+            if message != previous:
+                print(message, flush=True)
+                previous = message
+            notify(f"STATUS={message}\nWATCHDOG=1")
+            stop.wait(interval)
+    finally:
+        enable()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("run", "enable", "status"))
+    args = parser.parse_args()
+    if args.action == "enable":
+        enable()
+    elif args.action == "status":
+        print("Battery:", read(BATTERY, "capacity") + "%")
+        print("Charging enabled:", read(charger(), "charging_enabled"))
+        start, end = read_config(CONFIG)
+        print(f"Start: {start}%, stop: {end}%")
+    else:
+        stop = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stop.set())
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        run(CONFIG, stop)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"apollo-charge-limit: {exc}", file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,6 @@
+# /etc/default/phone-bootimg on apollo. Only DTB is read here, by
+# phone-kexec-test, to find the kernel package's device tree (its default is
+# negroni's). The boot image hook (loader/zz-phone-bootimg) is not used: the
+# boot partition keeps the loader kernel.
+# Relative to /usr/lib/linux-image-<release>/.
+DTB=qcom/sm8250-xiaomi-apollo.dtb

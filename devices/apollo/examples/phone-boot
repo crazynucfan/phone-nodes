@@ -1,0 +1,29 @@
+# /etc/default/phone-boot on apollo: read by phone-kexec-loader and
+# phone-kexec-test. loader/examples/phone-boot explains each setting;
+# docs/apollo.md says why apollo has these values.
+
+# Xiaomi's bootloader adds androidboot.keymaster=1 to the command line; it
+# means nothing to a mainline kernel, so it marks a bootloader boot.
+PHONE_BOOT_LOADER_MARK=androidboot.keymaster=1
+
+# The kernel pets the watchdog the loader kernel's systemd left armed until
+# userspace takes it over, and stops after 180 s if that never happens. The
+# series' kernels panic on lockups and reboot 10 s after a panic by themselves.
+PHONE_KEXEC_ARGS="watchdog.open_timeout=180"
+
+PHONE_KEXEC_RMTFS_HANDBACK=0
+
+# The secure firmware turns a cold (PSCI) reset into a power-off: every reset
+# must be warm, the kexec'd kernel's included.
+PHONE_KEXEC_REBOOT_MODE=warm
+
+PHONE_KEXEC_CONSOLE_LOGLEVEL=
+PHONE_KEXEC_OFFLINE_CPUS=0
+
+# The bootloader passes the loader kernel's (7.1) device tree; the series'
+# 7.2 kernels need their own, with the bootloader's memory layout.
+PHONE_KEXEC_DTB_BASE=package
+
+# The loader kernel drives the panel (msm display built in); a jump with the
+# panel on resets the phone.
+PHONE_KEXEC_DISPLAY_OFF=1

@@ -22,8 +22,9 @@
 # tree is fetched and deleted again. OBJ overrides the scratch build
 # directory, which is always deleted first and afterwards.
 #
-# DISTCC_POOL=<dns-name>[/<jobs-per-server>] also compiles on the distcc
-# servers that name resolves to, those whose compiler matches the local one.
+# DISTCC_POOL=<dns-name>[,<dns-name>...][/<jobs-per-server>] also compiles on
+# the distcc servers that name resolves to, those whose compiler matches the
+# local one. Further names are fallbacks: the first with a usable server wins.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 dev=${1:?device}

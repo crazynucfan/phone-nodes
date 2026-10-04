@@ -1,0 +1,32 @@
+From 098dcf7230267b804ece2a25eb4630e169e94c01 Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 18:44:45 +0100
+Subject: [PATCH] arm64: apollo_defconfig: nftables fib for the inet family
+
+Podman's netavark sets up container networking with an inet-family
+nftables table whose rules use fib expressions; without NFT_FIB_INET the
+kernel rejects them ("Could not process rule: No such file or
+directory") and no container with a network starts. The other node
+kernels (negroni, rhodep) build it as a module; IPv4 and IPv6 fib are
+already there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/configs/apollo_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/configs/apollo_defconfig b/arch/arm64/configs/apollo_defconfig
+index a156f4cd5..9ea75bc61 100644
+--- a/arch/arm64/configs/apollo_defconfig
++++ b/arch/arm64/configs/apollo_defconfig
+@@ -170,6 +170,7 @@ CONFIG_NFT_QUOTA=m
+ CONFIG_NFT_REJECT=m
+ CONFIG_NFT_COMPAT=m
+ CONFIG_NFT_HASH=m
++CONFIG_NFT_FIB_INET=m
+ CONFIG_NFT_XFRM=m
+ CONFIG_NFT_SOCKET=m
+ CONFIG_NFT_OSF=m
+-- 
+2.53.0
+

@@ -10,6 +10,13 @@
 # so there is nothing to carry over either).
 #   phone-kexec-dtb <out.dtb> [<package.dtb>]
 #
+# PHONE_KEXEC_DTB_BASE=package starts from the next kernel's package DTB
+# instead, with the running tree's memory nodes (the bootloader's layout) copied
+# in. For a phone whose boot partition kernel is older than the kernels it
+# kexecs, so that the trees differ beyond the bootloader's fixups: apollo runs
+# royka1's 7.1 tree under 7.2 kernels (PCIe iommu-map cells, the USB-C VBUS
+# supply). The bootloader's /chosen is not needed: kexec writes its own.
+#
 # With the next kernel's package DTB and PHONE_KEXEC_DTB_WATCHDOG=1, the APSS
 # watchdog node that DTB describes (and the bootloader's tree does not) is
 # carried over, with its clock resolved by path in the running tree. Off by
@@ -23,14 +30,31 @@ command -v dtc >/dev/null || { echo "dtc missing (device-tree-compiler)" >&2; ex
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+base=/sys/firmware/fdt based="the running fdt"
+if [ "${PHONE_KEXEC_DTB_BASE:-running}" = package ]; then
+    [ -n "$pkg" ] && [ -s "$pkg" ] || { echo "PHONE_KEXEC_DTB_BASE=package needs the package DTB, have: ${pkg:-none}" >&2; exit 1; }
+    command -v fdtput >/dev/null || { echo "fdtput missing (device-tree-compiler)" >&2; exit 1; }
+    cp "$pkg" "$tmp/base.dtb"
+    # The node names from the kernel's view of the same tree: fdtget -l stops
+    # after the first two root nodes of apollo's bootloader-modified tree.
+    mem=$(cd /proc/device-tree && ls -d memory@* 2>/dev/null || true)
+    [ -n "$mem" ] || { echo "no memory node in the running fdt" >&2; exit 1; }
+    for m in $mem; do
+        fdtget "$tmp/base.dtb" "/$m" device_type >/dev/null 2>&1 || fdtput -c "$tmp/base.dtb" "/$m"
+        fdtput -t s "$tmp/base.dtb" "/$m" device_type memory
+        # shellcheck disable=SC2046 # one argument per cell
+        fdtput -t x "$tmp/base.dtb" "/$m" reg $(fdtget -t x /sys/firmware/fdt "/$m" reg)
+    done
+    base=$tmp/base.dtb based="the package DTB with the running memory layout ($mem)"
+fi
 # Checked on the binary tree, before decompiling it: Motorola's bootloader
 # adds /chosen properties whose names dtc refuses to decompile.
 if ! grep -q -a 'arm,gic-v3-its' /sys/firmware/fdt; then
-    cp /sys/firmware/fdt "$out"
-    echo "$out: $(stat -c %s "$out") bytes, the running fdt (no GIC ITS, so no LPI tables to reserve)"
+    cp "$base" "$out"
+    echo "$out: $(stat -c %s "$out") bytes, $based (no GIC ITS, so no LPI tables to reserve)"
     exit 0
 fi
-dtc -q -I dtb -O dts -o "$tmp/base.dts" /sys/firmware/fdt
+dtc -q -I dtb -O dts -o "$tmp/base.dts" "$base"
 
 # name, physical address, size: from the running kernel's boot log
 # The kernel log of this boot: the journal keeps all of it, dmesg's ring buffer rotates.
@@ -93,6 +117,6 @@ if [ "${PHONE_KEXEC_DTB_WATCHDOG:-0}" = 1 ] && [ -n "$pkg" ] && [ -s "$pkg" ]; t
         fi
     fi
 fi
-echo "$out: $(stat -c %s "$out") bytes, reserved for the next kernel:"
+echo "$out: $(stat -c %s "$out") bytes, $based; reserved for the next kernel:"
 printf '%s\n' "$nodes" | awk '{ printf "  %-22s %s +%s\n", $1, $2, $3 }'
 [ -z "$carried" ] || echo "carried over from the package DTB: $carried"

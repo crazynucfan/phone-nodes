@@ -119,6 +119,8 @@ uses only the first name.
 | `PHONE_KEXEC_REBOOT_MODE` | empty | written to `/sys/kernel/reboot/mode` just before the jump, so it decides how the kexec'd kernel's crash or watchdog bite resets the SoC; `warm` keeps RAM and with it the pstore record; empty leaves the kernel's default (cold); `warm` is not safe everywhere: it took a negroni down |
 | `PHONE_KEXEC_OFFLINE_CPUS` | `0` | `1` takes the secondary CPUs offline a moment before the jump and logs how each powered off; a diagnostic; never on negroni, where CPU hotplug stalls storage I/O |
 | `PHONE_KEXEC_OFFLINE_SETTLE` | `1` | seconds to wait after taking the CPUs offline |
+| `PHONE_KEXEC_DTB_BASE` | `running` | the kexec'd kernel's device tree: `running` is the tree the bootloader passed, as booted; `package` is the kernel package's DTB with the running tree's memory nodes copied in, for a loader kernel whose tree is older than the kexec'd kernels' (apollo) |
+| `PHONE_KEXEC_DISPLAY_OFF` | `0` | `1` blanks the framebuffers before the jump, turning the display off through DRM; needed where the loader kernel drives the panel (apollo) |
 | `PHONE_KEXEC_CONSOLE_LOGLEVEL` | empty | console log level (`dmesg -n`) for this kernel's last steps, so its CPU shutdown messages reach the pstore console; empty leaves it alone |
 | `PHONE_BOOT_MAX_STRIKES` | `2` | unblessed launches of the good kernel in a row before the loader stays on the loader kernel |
 | `PHONE_BOOT_PSTORE_KEEP` | `10` | pstore captures to keep |
@@ -139,7 +141,8 @@ Read elsewhere:
   between checks) and `PHONE_BOOT_HEALTH_CMD` (empty: the default check).
 - The trial hook gives a new trial `PHONE_BOOT_TRIES` tries (2).
 
-What rhodep sets, and why, is in [rhodep.md](rhodep.md#loader-settings).
+What rhodep and apollo set, and why, is in
+[rhodep.md](rhodep.md#loader-settings) and [apollo.md](apollo.md#loader-settings).
 
 ## Crash reports
 

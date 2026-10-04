@@ -1,0 +1,3 @@
+# /etc/default/phone-kexec on apollo: which kernels are this device's
+# (releases look like <version>-apollo-<build>).
+FLAVOUR="apollo"

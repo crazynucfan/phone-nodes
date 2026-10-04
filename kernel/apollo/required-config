@@ -8,3 +8,18 @@ CONFIG_PCIE_QCOM=y
 CONFIG_ATH11K_PCI=m|y
 CONFIG_QCOM_WDT=y
 # CONFIG_MODVERSIONS is not set
+#! The node MAC on the USB Ethernet adapter needs r8152 (r8153_ecm drops unicast to it).
+CONFIG_USB_RTL8152=m|y
+#! A hung kernel only comes back by panicking or by the watchdog, so the
+#! lockup detectors must panic and a panic must reboot (patch 0004). Cilium
+#! needs kernel BTF.
+CONFIG_DETECT_HUNG_TASK=y
+CONFIG_PANIC_ON_OOPS=y
+CONFIG_PANIC_TIMEOUT=10
+CONFIG_SOFTLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=1
+CONFIG_HARDLOCKUP_DETECTOR=y
+CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=y
+CONFIG_DEBUG_INFO_BTF=y
+#! Podman (netavark) builds its container networks from inet nftables rules with fib.
+CONFIG_NFT_FIB_INET=m|y

@@ -12,8 +12,8 @@ without anyone at the phone.
 | Codename | Phone | Model | SoC | Base | Status |
 |---|---|---|---|---|---|
 | negroni | OnePlus 10 Pro | NE2213 | SM8450 | v7.3-rc5 | runs as a node; kernels via the kexec loader |
-| apollo | Xiaomi Mi 10T Pro | M2007J3SG | SM8250 | v7.2.8 | series builds; not yet booted from these builds |
-| rhodep | Motorola moto g82 5G | XT2225 | SM6375 | v7.2.8 | runs as a node; kernels via the kexec loader |
+| apollo | Xiaomi Mi 10T Pro | M2007J3SG | SM8250 | v7.2.9 | runs as a node; kernels via the kexec loader |
+| rhodep | Motorola moto g82 5G | XT2225 | SM6375 | v7.2.9 | runs as a node; kernels via the kexec loader |
 
 ## Layout
 
@@ -30,6 +30,9 @@ devices/negroni/     negroni's USB Ethernet recovery and charge limit
 devices/negroni/tmpfiles/
                      tmpfiles.d rules: UFS clock scaling off, and a fix for
                      node_exporter's CPU frequency metrics
+devices/apollo/      apollo's charge limit, USB host role unit, DSP blacklist,
+                     watchdog timeout cap, tmpfiles rules and /etc/default
+                     examples
 devices/rhodep/      rhodep's boot image packing and flashing scripts, modem
                      file system overlay, USB host role unit and watchdog
                      timeout cap
@@ -92,7 +95,8 @@ to make kexec work on these SoCs is in
   Read the device notes first: negroni's A/B slot retry trap looks like a
   brick.
 - No firmware is included. DSP, modem and Wi-Fi firmware stays the vendor's
-  and is loaded from the phone's own partitions at runtime.
+  and is loaded from the phone's own partitions at runtime (apollo's Wi-Fi
+  firmware comes from linux-firmware, and its node kernels start no DSP).
 - Check your device's reboot quirks: negroni must never warm-reboot, while
   apollo must.
 
