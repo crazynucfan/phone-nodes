@@ -15,3 +15,6 @@
 0015-arm64-rhodep_defconfig-panic-and-reboot-on-lockups.patch
 0016-soc-qcom-rmtfs_mem-Use-a-region-a-previous-kernel-al.patch
 0017-arm64-rhodep_defconfig-pseudo-NMI.patch
+0018-dt-bindings-power-supply-add-CellWise-CW2217-fuel-ga.patch
+0019-power-supply-add-read-only-CellWise-CW2217-fuel-gaug.patch
+0020-arm64-dts-qcom-rhodep-expose-the-CW2217-battery-gaug.patch

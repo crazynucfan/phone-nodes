@@ -11,7 +11,7 @@ without anyone at the phone.
 
 | Codename | Phone | Model | SoC | Base | Status |
 |---|---|---|---|---|---|
-| negroni | OnePlus 10 Pro | NE2213 | SM8450 | v7.3-rc5 | runs as a node; kernels via the kexec loader |
+| negroni | OnePlus 10 Pro | NE2213 | SM8450 | v7.3-rc6 | runs as a node; kernels via the kexec loader |
 | apollo | Xiaomi Mi 10T Pro | M2007J3SG | SM8250 | v7.2.9 | runs as a node; kernels via the kexec loader |
 | rhodep | Motorola moto g82 5G | XT2225 | SM6375 | v7.2.9 | runs as a node; kernels via the kexec loader |
 
@@ -19,7 +19,8 @@ without anyone at the phone.
 
 ```
 kernel/<device>/     BASE, series, patches/, build.env, required-config,
-                     dtb.sha256
+                     dtb.sha256, and tests/ for drivers that can be tested
+                     off the phone (apollo, rhodep)
 kernel/scripts/      fetch.sh, apply.sh, build.sh, check-artifacts.sh,
                      distcc-pool.sh, export.sh
 kernel/Dockerfile    the cross toolchain and the build as Docker stages
@@ -63,9 +64,11 @@ kernel/scripts/build.sh negroni local1 out/negroni
 
 The output holds the kernel, the DTB, the modules and Debian packages:
 `linux-image-<release>` plus the meta package `linux-image-<device>`.
-`kernel/scripts/check-artifacts.sh` checks a build against the device's
-`required-config`, the DTB hash and the kexec size budget. The build id
-becomes part of the kernel release, so every build needs its own.
+`kernel/scripts/check-artifacts.sh <device> <output>` checks a build against
+the device's `required-config`, the DTB hash and the kexec size budget. The
+Docker build runs it before it hands anything out; after `build.sh`, run it
+yourself. The build id becomes part of the kernel release, so every build
+needs its own.
 
 ## Running kernels through the loader
 
@@ -85,6 +88,16 @@ The design is in [docs/kexec-loader.md](docs/kexec-loader.md), and what it took
 to make kexec work on these SoCs is in
 [docs/kexec-on-qualcomm.md](docs/kexec-on-qualcomm.md). Device notes:
 [negroni](docs/negroni.md), [apollo](docs/apollo.md), [rhodep](docs/rhodep.md).
+
+## Ethernet and Wi-Fi on one network
+
+Each phone here has a USB Ethernet adapter with power pass-through as its main
+path and Wi-Fi as the fallback, both on the same layer 2 segment. With Linux's
+defaults, Wi-Fi then answers ARP for the wired address as well, and after a
+USB drop the other machines kept the Wi-Fi MAC for it.
+`loader/examples/90-phone-network.conf` (for `/etc/sysctl.d/`) sets
+`arp_ignore=1` and `arp_announce=2`, so each address is only answered for on
+its own interface.
 
 ## Before you try this
 
@@ -113,7 +126,8 @@ its device's flavour.
 GPL-2.0-only; see [LICENSE](LICENSE). The kernel patches are derived from the
 Linux kernel and from the community forks named in [CREDITS.md](CREDITS.md),
 and every file keeps its original copyright and licence notices. The tooling in
-`loader/`, `devices/` and `kernel/scripts/` is GPL-2.0-only as well.
+`loader/`, `devices/`, `kernel/scripts/` and `kernel/<device>/tests/` is
+GPL-2.0-only as well.
 
 The exception is `third-party/msm-firmware-loader/`, a modified copy of an
 MIT-licensed project. Its README says where each file comes from and what was

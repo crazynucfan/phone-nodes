@@ -19,6 +19,7 @@ as on negroni and rhodep.
 | 0003 | bpf: a non-scalar `bpf_set_retval()` argument fails with -EACCES instead of -EINVAL (rhodep's 0012) |
 | 0004 | `apollo_defconfig`: soft and hard lockup panic, panic on oops, 10 s reboot, `test_lockup` |
 | 0005 | `apollo_defconfig`: nftables `fib` for the inet family |
+| 0006 | `qcom_pm8150b` charger: follow the USB-C (TCPM) input current limit |
 
 - **0001.** The modem is left out: it is an external SDX55 on PCIe, and the
   port's PCIe changes that only served it were dropped. The panel driver uses
@@ -41,6 +42,12 @@ The CPUs: cpu0-3 are Cortex-A55 (1.80 GHz, capacity 284), cpu4-6 Cortex-A77
 model for all three policies. Their temperatures are thermal zones named
 `cpu0-thermal` to `cpu3-thermal`, and `cpu4-top-thermal`/`cpu4-bottom-thermal`
 to `cpu7-…` for the big cores.
+
+- **0006.** The charger drew 500 mA whatever the adapter offered. See
+  [USB-C input current](#usb-c-input-current).
+
+`kernel/apollo/tests/check-pd-policy.py` tests 0006's policy off the phone
+(below).
 
 ## Boot and the loader kernel
 
@@ -135,6 +142,55 @@ a placeholder (`00:03:7f:12:xx:xx`) that changes at every boot, so each boot
 gets a new lease unless a stable, locally administered MAC is set
 (`MACAddress=` in a `.link` or the `.network` file).
 
+## USB-C input current
+
+Through the Ethernet adapter the phone negotiated 9 V / 2.21 A, but the
+charger's effective input current limit and its AICL result both stayed at
+500 mA. The driver wrote its limit to the current configuration register and
+left the APSD current override off, and it kept retrying legacy (BC1.2)
+detection, which never gets a result during PD.
+
+Patch 0006 links the charger to the PM8150B's TCPM power supply
+(`power-supplies = <&pm8150b_typec>` in `pm8150b.dtsi`) and follows it:
+
+- It uses TCPM's `CURRENT_NOW`, the draw that is permitted right now (standby
+  during a transition included), not an advertised maximum. It rounds down to
+  the 50 mA step and selects software high-current control after programming
+  the limit.
+- It stops BC1.2/HVDCP detection while Type-C or PD decides the limit, and
+  suspends the input on detach or when the port turns source.
+- Writes to the sysfs current limit are bounded by the live allowance. Unknown
+  USB sources stay at 500 mA, and BC1.2-only CDP/DCP sources at 1.5 A.
+- AICL, collapse protection and the battery temperature and charge controls
+  are kept. The 75–80% charge limit below still works through
+  `charging_enabled`, independently.
+
+The register sequence follows Qualcomm's downstream `smb5-lib.c` (CREDITS.md).
+
+The patch changes the DTB, and `kernel/apollo/dtb.sha256` has the new hash. A
+kexec'd kernel gets the package's DTB on this phone (`PHONE_KEXEC_DTB_BASE`
+above), so the change takes effect without touching the boot partition.
+
+**Trial (2026-10-09), a local build `7.2.9-apollo-pd-local1`:** kexec'd by the
+loader's helper, with Ethernet and k3s healthy. After a power cycle of the
+charger, the phone negotiated 9 V / 2.21 A, the effective input limit became
+2.20 A and the battery charged at about 2.93 A. See
+[Not proven yet](#not-proven-yet) for what the trial did not show.
+
+The policy can be tested off the phone, against a Linux tree with the series
+applied. It needs a host C compiler:
+
+```sh
+python3 kernel/apollo/tests/check-pd-policy.py /path/to/patched/linux
+```
+
+The script compiles the driver's own policy and register routines with fake
+TCPM and PMIC interfaces. It covers the 500 mA and 2.21 A offers seen on the
+phone, standby, Type-C Rp levels, detach and source role, the current step
+boundaries, read and write failures, the sysfs bounds, and that the charge
+limit keeps input power. It complements a build and a trial on the phone; it
+does not replace them.
+
 ## Charge limit
 
 The PM8150B charger exposes only `charging_enabled`, with no thresholds.
@@ -165,6 +221,15 @@ over a page, and the kernel answers EFBIG).
 
 ## Not proven yet
 
+- **USB-PD after a kexec.** In the 0006 trial the adapter kept its old 9 V
+  output across the jump, while TCPM in the new kernel received no PD messages
+  and fell back to Type-C 5 V / 3 A. A software Type-C reset did not restore
+  PD; a power cycle of the charger did. So an unattended reboot may leave the
+  phone charging at the Type-C level until the charger is power-cycled.
+- **0006 as published has not been booted.** The trial build (`local1`) used
+  `system_wq` and logged a deprecation warning. The patch now uses
+  `system_percpu_wq`; that version (`local2`) builds and passes the artifact
+  checks only.
 - A hang that also stops the lockup detectors (every CPU stuck with
   interrupts off, and no other CPU left to notice) has nothing to reset it:
   the watchdog does not (above), so the phone stays hung until Power is held.

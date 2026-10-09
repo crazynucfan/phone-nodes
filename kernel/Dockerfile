@@ -10,7 +10,7 @@
 # The `distccd` target is the compile server CI spreads the compiling over
 # (DISTCC_POOL below).
 
-ARG DEBIAN=docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+ARG DEBIAN=docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 FROM --platform=$BUILDPLATFORM ${DEBIAN} AS toolchain
 RUN apt-get update \
@@ -43,6 +43,7 @@ RUN bash /phone-kernel/scripts/fetch.sh "${DEVICE}" /src
 FROM source AS build
 ARG DEVICE=negroni
 ARG BUILD_ID=local
+ARG INPUT_KEY=local
 # DISTCC_POOL=<dns name>[,<dns name>...][/<jobs per server>] spreads the
 # compiling over the distcc servers the first name with a usable server
 # resolves to (see build.sh). Unset, or when none answers with the same
@@ -58,6 +59,8 @@ COPY scripts/ /phone-kernel/scripts/
 COPY ${DEVICE}/ /phone-kernel/${DEVICE}/
 RUN --mount=type=cache,target=/ccache,id=phone-kernel-ccache \
     SRC=/src bash /phone-kernel/scripts/build.sh "${DEVICE}" "${BUILD_ID}" /out \
+ && bash /phone-kernel/scripts/check-artifacts.sh "${DEVICE}" /out \
+ && printf '%s\n' "${INPUT_KEY}" > /out/input-key \
  && { ccache --show-stats | sed -n '1,12p' || true; }
 
 FROM scratch AS artifacts

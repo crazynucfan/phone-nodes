@@ -1,7 +1,8 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
 # negroni: OnePlus 10 Pro (NE2213, SM8450)
 
-The series in `kernel/negroni/` applies to v7.3-rc5. It builds
+The series in `kernel/negroni/` applies to v7.3-rc6 (the node itself still
+runs a build on rc5, the previous base). It builds
 `qcom/sm8450-oneplus-negroni.dtb` with `negroni_defconfig`, and kernels are
 released as `<version>-negroni-<build>`. Patch 1 is the device support,
 reduced from the withsalt/linux fork (see CREDITS.md). The others:

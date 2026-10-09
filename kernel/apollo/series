@@ -3,3 +3,4 @@
 0003-bpf-Reject-a-non-scalar-bpf_set_retval-argument-with.patch
 0004-arm64-apollo_defconfig-panic-and-reboot-on-lockups.patch
 0005-arm64-apollo_defconfig-nftables-fib-for-the-inet-fam.patch
+0006-power-supply-qcom_pm8150b-follow-TCPM-input-current-.patch

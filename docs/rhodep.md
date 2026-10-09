@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
 # rhodep: Motorola moto g82 5G (SM6375)
 
-The series in `kernel/rhodep/` applies to v7.2.8. It builds
+The series in `kernel/rhodep/` applies to v7.2.9. It builds
 `qcom/sm6375-motorola-rhodep.dtb` with `rhodep_defconfig`, and kernels are
 released as `<version>-rhodep-<build>`. See CREDITS.md for where the patches
 come from.
@@ -27,8 +27,9 @@ Patches 0001–0011 are the device support:
   there is no console at all, `/dev/console` cannot be opened, and the
   initramfs's final `exec` kills PID 1.
 
-There are no drivers for the Type-C CC logic (SGM7220) or the fuel gauge
-(CW2217).
+There is no driver for the Type-C CC logic (SGM7220). The fuel gauge (CW2217)
+has a read-only driver since patches 0018–0020, described
+[below](#the-fuel-gauge-0018-to-0020).
 
 Patches 0012–0017 are what a node and the kexec loader needed on top:
 
@@ -76,6 +77,58 @@ Patches 0012–0017 are what a node and the kexec loader needed on top:
 
 How 0013, 0014, 0016 and 0017 were found is in
 [kexec-on-qualcomm.md](kexec-on-qualcomm.md).
+
+### The fuel gauge (0018 to 0020)
+
+| Patch | What |
+|---|---|
+| 0018 | the device tree binding for the CellWise CW2217 |
+| 0019 | `cw2217_battery`: a read-only driver for it |
+| 0020 | the gauge in rhodep's device tree (I2C8, address 0x64), and the driver as a module in `rhodep_defconfig` |
+
+The driver reports the charge percentage, voltage, signed current,
+temperature, cycle count and the gauge's health estimate through
+`power_supply`. It only reads:
+
+- Motorola's bootloader has already loaded the battery's own profile into the
+  gauge. The driver never resets the chip and never loads a profile, and its
+  regmap refuses every register write.
+- Before reporting anything it checks the chip identity, the firmware family,
+  the active mode, the profile-loaded flag and the ready state. A gauge that is
+  asleep or has no profile gives an error, not an invented reading.
+- The current needs the board's sense resistor: 5 mΩ on rhodep, from
+  Motorola's stock device tree (`shunt-resistor-micro-ohms = <5000>`).
+
+**Trial (2026-10-09):** the driver, built as a module for the running
+`7.2.9-rhodep-ci158` kernel and loaded without a reboot, reported about 76%,
+4.11 V and 38 °C. The percentage is the gauge's raw value, without Android's
+rescaling for its UI. The cycle count and health are the gauge's own
+estimates, not checked against anything.
+
+**With the kexec loader, the new device tree alone does not bring the gauge
+up.** rhodep's kexec'd kernels get the running device tree, the one the
+bootloader passed from `vendor_boot`. The node from 0020 only appears once the
+boot images are packed again with a DTB from this series. Until then the gauge
+can be created by hand. The driver takes the sense resistor as a module
+parameter for that case (`<N>` is Linux's number for the bus the device tree
+calls I2C8):
+
+```sh
+modprobe cw2217_battery shunt_resistor_micro_ohms=5000
+echo cw2217 0x64 > /sys/bus/i2c/devices/i2c-<N>/new_device
+```
+
+The driver's routines can be tested off the phone, against a Linux tree with
+the series applied (it needs a host C compiler):
+
+```sh
+python3 kernel/rhodep/tests/check-gauge.py /path/to/patched/linux
+```
+
+The script compiles the driver's own C routines with a fake read-only
+transport. It covers every signed current value, the unit conversions, the
+retry of a word whose high byte rolled over, readiness and I2C errors, and the
+ban on register writes.
 
 ## Loader settings
 
@@ -249,7 +302,9 @@ The rule has no long soak behind it yet.
   cold boot of a kernel with 0013–0017 as the loader kernel is untested.
 - Why pseudo-NMI stops the CPU 6 hang is a hypothesis. The result is what was
   measured: no hang in 36 launches.
-- There is no fuel gauge driver, so Linux reports no charge percentage.
+- The fuel gauge driver (0018–0020) has only run as a module loaded into a
+  running kernel built without it. A kernel built from the whole series, and
+  the gauge probed from the device tree, have not been booted.
 - `pack-bootimg.sh` reproduces the images running on the phone byte for byte,
   except `dtbo.img`: the flashed one was built with another name for the empty
   property its overlays add (`NOOP_PROPERTY`). The name is arbitrary, but a

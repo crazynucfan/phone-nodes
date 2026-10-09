@@ -1,0 +1,483 @@
+From a04063dd5199b52e9b4507c1194304773204699c Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 16:52:38 +0000
+Subject: [PATCH] power: supply: qcom_pm8150b: follow TCPM input current limits
+
+apollo negotiates 9 V / 2.21 A through its Ethernet adapter, but SMB5's
+ICL_STATUS and AICL_STATUS remain at 500 mA. The driver only programs
+USBIN_CURRENT_LIMIT_CFG, leaves the APSD current override disabled, and
+retries APSD indefinitely because there is no BC1.2 result during PD.
+
+Link the charger to the PM8150B TCPM power supply. React to its events
+and use CURRENT_NOW, which represents the permitted draw including
+standby and PPS rather than an advertised maximum. Select Qualcomm's
+SW_OVERRIDE_HC_MODE after programming that budget and stop BC1.2/HVDCP
+detection while Type-C or PD determines the limit. Retain AICL, collapse
+and battery-temperature protection, and round down to the 50 mA step.
+
+Suspend input on detach/source role or a failed supply query. Bound
+sysfs current writes by the live allowance, keep unknown USB sources
+at 500 mA and BC1.2-only CDP/DCP sources at 1.5 A. Report TCPM's USB
+type during PD and read the effective ICL register instead of the
+previous AICL result. Quiesce policy work before the reboot parking
+sequence so a late TCPM event cannot undo it.
+
+Reference hardware sequence:
+https://android.googlesource.com/kernel/msm/+/b6410c3f75259c0ca2df45a01838d2e46272723e/drivers/power/supply/qcom/smb5-lib.c
+
+Validated with the Apollo config on Linux 7.2.9 and 3338 simulated TCPM/PMIC
+contract, rounding, error and sysfs-bound cases. The local1 on-phone trial
+negotiated 9 V / 2.21 A after a charger-side power cycle, with effective
+ICL at 2.20 A and battery charging near 2.93 A. PD recovery across kexec
+remains unresolved. The system_percpu_wq warning fix compiles in local2
+but has not been booted yet; see docs/apollo.md for trial details.
+---
+ arch/arm64/boot/dts/qcom/pm8150b.dtsi       |   1 +
+ drivers/power/supply/qcom_pm8150b_charger.c | 279 ++++++++++++++++++--
+ 2 files changed, 256 insertions(+), 24 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/pm8150b.dtsi b/arch/arm64/boot/dts/qcom/pm8150b.dtsi
+index a1a703520..91ae6aec2 100644
+--- a/arch/arm64/boot/dts/qcom/pm8150b.dtsi
++++ b/arch/arm64/boot/dts/qcom/pm8150b.dtsi
+@@ -109,6 +109,7 @@ pm8150b_temp: temp-alarm@2400 {
+ 		pm8150b_charger: charger@1000 {
+ 			compatible = "qcom,pm8150b-charger";
+ 			reg = <0x1000>;
++			power-supplies = <&pm8150b_typec>;
+ 
+ 			interrupts = <0x2 0x13 0x4 IRQ_TYPE_EDGE_BOTH>,
+ 				     <0x2 0x12 0x2 IRQ_TYPE_EDGE_BOTH>,
+diff --git a/drivers/power/supply/qcom_pm8150b_charger.c b/drivers/power/supply/qcom_pm8150b_charger.c
+index 59c053b94..564ab4816 100644
+--- a/drivers/power/supply/qcom_pm8150b_charger.c
++++ b/drivers/power/supply/qcom_pm8150b_charger.c
+@@ -16,6 +16,7 @@
+ #include <linux/kernel.h>
+ #include <linux/minmax.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_wakeirq.h>
+ #include <linux/of.h>
+@@ -252,11 +253,11 @@
+ #define AICL_RERUN_TIME_MASK			GENMASK(1, 0)
+ 
+ #define SDP_CURRENT_UA			500000
+-#define CDP_CURRENT_UA			3000000
+-#define DCP_CURRENT_UA			3300000
+-#define CURRENT_MAX_UA			DCP_CURRENT_UA
++#define CDP_CURRENT_UA			1500000
++#define DCP_CURRENT_UA			1500000
++#define CURRENT_MAX_UA			3300000
+ 
+-/* pmi8150b registers represent current in increments of 1/40th of an amp */
++/* PM8150B current-limit registers use 50 mA steps. */
+ #define CURRENT_SCALE_FACTOR		50000
+ /* clang-format on */
+ 
+@@ -290,6 +291,10 @@ struct smb5_register {
+  * @usb_in_i_chan:	USB_IN current measurement channel
+  * @usb_in_v_chan:	USB_IN voltage measurement channel
+  * @chg_psy:		Charger power supply instance
++ * @usb_psy:		TCPM power supply for the USB-C connector
++ * @usb_nb:		Notifier for TCPM current/role changes
++ * @input_lock:		Serializes input policy and sysfs current writes
++ * @shutting_down:	Prevents policy work from undoing the shutdown sequence
+  */
+ struct smb5_chip {
+ 	struct device *dev;
+@@ -306,6 +311,10 @@ struct smb5_chip {
+ 	struct iio_channel *usb_in_v_chan;
+ 
+ 	struct power_supply *chg_psy;
++	struct power_supply *usb_psy;
++	struct notifier_block usb_nb;
++	struct mutex input_lock; /* Input policy and sysfs writes */
++	bool shutting_down;
+ };
+ 
+ static enum power_supply_property smb5_properties[] = {
+@@ -336,12 +345,26 @@ static int smb5_get_prop_usb_online(struct smb5_chip *chip, int *val)
+ 	return 0;
+ }
+ 
++static bool smb5_is_pd(int usb_type)
++{
++	switch (usb_type) {
++	case POWER_SUPPLY_USB_TYPE_PD:
++	case POWER_SUPPLY_USB_TYPE_PD_PPS:
++	case POWER_SUPPLY_USB_TYPE_PD_SPR_AVS:
++	case POWER_SUPPLY_USB_TYPE_PD_PPS_SPR_AVS:
++		return true;
++	default:
++		return false;
++	}
++}
++
+ /*
+  * Qualcomm "automatic power source detection" aka APSD
+  * tells us what type of charger we're connected to.
+  */
+ static int smb5_apsd_get_charger_type(struct smb5_chip *chip, int *val)
+ {
++	union power_supply_propval type, budget;
+ 	unsigned int apsd_stat, stat;
+ 	int usb_online = 0;
+ 	int rc;
+@@ -352,6 +375,28 @@ static int smb5_apsd_get_charger_type(struct smb5_chip *chip, int *val)
+ 		return rc;
+ 	}
+ 
++	/* APSD is disabled during PD; report TCPM's type instead. */
++	if (chip->usb_psy) {
++		rc = power_supply_get_property(chip->usb_psy,
++					       POWER_SUPPLY_PROP_USB_TYPE, &type);
++		if (rc)
++			return rc;
++		if (smb5_is_pd(type.intval)) {
++			*val = type.intval;
++			return 0;
++		}
++		if (type.intval == POWER_SUPPLY_USB_TYPE_C) {
++			rc = power_supply_get_property(chip->usb_psy,
++						       POWER_SUPPLY_PROP_CURRENT_NOW, &budget);
++			if (rc)
++				return rc;
++			if (budget.intval > SDP_CURRENT_UA) {
++				*val = type.intval;
++				return 0;
++			}
++		}
++	}
++
+ 	rc = regmap_read(chip->regmap, chip->base + APSD_STATUS, &apsd_stat);
+ 	if (rc < 0) {
+ 		dev_err(chip->dev, "Failed to read apsd status, rc = %d", rc);
+@@ -455,12 +500,13 @@ static int smb5_get_prop_status(struct smb5_chip *chip, int *val)
+ }
+ 
+ static inline int smb5_get_current_limit(struct smb5_chip *chip,
+-					 unsigned int *val)
++					 int *val)
+ {
+-	int rc = regmap_read(chip->regmap, chip->base + AICL_STATUS, val);
++	unsigned int raw;
++	int rc = regmap_read(chip->regmap, chip->base + ICL_STATUS, &raw);
+ 
+ 	if (rc >= 0)
+-		*val *= CURRENT_SCALE_FACTOR;	
++		*val = (raw & ICL_INPUT_CURRENT_LIMIT_MASK) * CURRENT_SCALE_FACTOR;
+ 	return rc;
+ }
+ 
+@@ -485,19 +531,133 @@ static int smb5_set_prop_charging_enabled(struct smb5_chip *chip, unsigned int v
+ 					CHARGING_ENABLE_CMD_BIT, val ? CHARGING_ENABLE_CMD_BIT : 0);
+ }
+ 
++/* CURRENT_NOW is TCPM's actual limit, including PD transition standby. */
++static int smb5_get_typec_limit(struct smb5_chip *chip, unsigned int *current_ua,
++				bool *typec_limit)
++{
++	union power_supply_propval online, budget, type;
++	int rc;
++
++	*current_ua = SDP_CURRENT_UA;
++	*typec_limit = false;
++	if (!chip->usb_psy)
++		return 0;
++
++	rc = power_supply_get_property(chip->usb_psy, POWER_SUPPLY_PROP_ONLINE,
++				       &online);
++	if (rc)
++		return rc;
++	if (!online.intval) {
++		*current_ua = 0;
++		*typec_limit = true;
++		return 0;
++	}
++
++	rc = power_supply_get_property(chip->usb_psy, POWER_SUPPLY_PROP_USB_TYPE,
++				       &type);
++	if (rc)
++		return rc;
++	rc = power_supply_get_property(chip->usb_psy, POWER_SUPPLY_PROP_CURRENT_NOW,
++				       &budget);
++	if (rc)
++		return rc;
++
++	if (smb5_is_pd(type.intval) || budget.intval > SDP_CURRENT_UA ||
++	    budget.intval <= 0) {
++		*current_ua = clamp(budget.intval, 0, CURRENT_MAX_UA);
++		*typec_limit = true;
++	}
++
++	return 0;
++}
++
++static int smb5_apply_input_limit(struct smb5_chip *chip, unsigned int current_ua,
++				  bool typec_limit)
++{
++	int rc;
++
++	/* Program the budget before enabling the software high-current path. */
++	rc = smb5_set_current_limit(chip, current_ua);
++	if (rc)
++		return rc;
++
++	/* BC1.2/HVDCP must not compete with the Type-C/PD current allowance. */
++	rc = regmap_update_bits(chip->regmap, chip->base + USBIN_OPTIONS_1_CFG,
++				BC1P2_SRC_DETECT_BIT | HVDCP_EN_BIT,
++				typec_limit ? 0 : BC1P2_SRC_DETECT_BIT);
++	if (rc)
++		return rc;
++	rc = regmap_update_bits(chip->regmap, chip->base + USBIN_ICL_OPTIONS,
++				USBIN_MODE_CHG_BIT | USB51_MODE_BIT | CFG_USB3P0_SEL_BIT,
++				USBIN_MODE_CHG_BIT | (typec_limit ? 0 : USB51_MODE_BIT));
++	if (rc)
++		return rc;
++	rc = regmap_update_bits(chip->regmap, chip->base + CMD_ICL_OVERRIDE,
++				ICL_OVERRIDE_BIT, 0);
++	if (rc)
++		return rc;
++	/* Qualcomm's SW_OVERRIDE_HC_MODE: follow USBIN_CURRENT_LIMIT_CFG. */
++	rc = regmap_update_bits(chip->regmap, chip->base + USBIN_LOAD_CFG,
++				ICL_OVERRIDE_AFTER_APSD_BIT,
++				typec_limit ? ICL_OVERRIDE_AFTER_APSD_BIT : 0);
++	if (rc)
++		return rc;
++
++	/* A zero/sub-step budget means detached, sourcing, or not ready. */
++	return regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
++				  USBIN_SUSPEND_BIT,
++				  current_ua < CURRENT_SCALE_FACTOR ? USBIN_SUSPEND_BIT : 0);
++}
++
++static int smb5_usb_changed(struct notifier_block *nb, unsigned long event,
++			    void *data)
++{
++	struct smb5_chip *chip = container_of(nb, struct smb5_chip, usb_nb);
++
++	if (event == PSY_EVENT_PROP_CHANGED && data == chip->usb_psy &&
++	    !READ_ONCE(chip->shutting_down))
++		mod_delayed_work(system_percpu_wq, &chip->status_change_work, 0);
++
++	return NOTIFY_OK;
++}
++
++static void smb5_unregister_usb_notifier(void *data)
++{
++	struct smb5_chip *chip = data;
++
++	power_supply_unreg_notifier(&chip->usb_nb);
++}
++
+ static void smb5_status_change_work(struct work_struct *work)
+ {
+-	unsigned int charger_type, current_ua;
++	unsigned int current_ua;
+ 	int usb_online = 0;
+-	int count, rc;
++	int count, rc, charger_type;
+ 	struct smb5_chip *chip;
++	bool typec_limit;
+ 
+ 	chip = container_of(work, struct smb5_chip, status_change_work.work);
+-
+-	smb5_get_prop_usb_online(chip, &usb_online);
+-	if (!usb_online)
++	if (READ_ONCE(chip->shutting_down))
+ 		return;
+ 
++	mutex_lock(&chip->input_lock);
++	rc = smb5_get_typec_limit(chip, &current_ua, &typec_limit);
++	if (rc) {
++		/* Never keep an old high-current allowance on a failed query. */
++		smb5_apply_input_limit(chip, 0, true);
++		goto retry;
++	}
++	if (typec_limit)
++		goto apply;
++
++	rc = smb5_get_prop_usb_online(chip, &usb_online);
++	if (rc)
++		goto retry;
++	if (!usb_online) {
++		current_ua = 0;
++		goto apply;
++	}
++
+ 	for (count = 0; count < 3; count++) {
+ 		dev_dbg(chip->dev, "get charger type retry %d\n", count);
+ 		rc = smb5_apsd_get_charger_type(chip, &charger_type);
+@@ -508,21 +668,16 @@ static void smb5_status_change_work(struct work_struct *work)
+ 
+ 	if (rc < 0 && rc != -EAGAIN) {
+ 		dev_err(chip->dev, "get charger type failed: %d\n", rc);
+-		return;
++		goto retry;
+ 	}
+ 
+ 	if (rc < 0) {
+-		/*
+-		 * APSD not done yet — set a conservative DCP interim limit so
+-		 * we charge at ≥1.5 A while waiting, then re-check after 1 s.
+-		 */
+-		smb5_set_current_limit(chip, DCP_CURRENT_UA);
++		/* No detection result is permission to draw more than USB500. */
++		smb5_apply_input_limit(chip, SDP_CURRENT_UA, false);
+ 		rc = regmap_update_bits(chip->regmap, chip->base + CMD_APSD,
+ 					APSD_RERUN_BIT, APSD_RERUN_BIT);
+-		schedule_delayed_work(&chip->status_change_work,
+-				      msecs_to_jiffies(1000));
+ 		dev_dbg(chip->dev, "get charger type failed, rerun apsd\n");
+-		return;
++		goto retry;
+ 	}
+ 
+ 	switch (charger_type) {
+@@ -538,8 +693,19 @@ static void smb5_status_change_work(struct work_struct *work)
+ 		break;
+ 	}
+ 
+-	smb5_set_current_limit(chip, current_ua);
++apply:
++	rc = smb5_apply_input_limit(chip, current_ua, typec_limit);
++	if (rc) {
++		dev_err_ratelimited(chip->dev, "Couldn't apply input current limit: %d\n", rc);
++		goto retry;
++	}
++	mutex_unlock(&chip->input_lock);
+ 	power_supply_changed(chip->chg_psy);
++	return;
++
++retry:
++	mutex_unlock(&chip->input_lock);
++	schedule_delayed_work(&chip->status_change_work, msecs_to_jiffies(1000));
+ }
+ 
+ static int smb5_get_iio_chan(struct smb5_chip *chip, struct iio_channel *chan,
+@@ -642,10 +808,32 @@ static int smb5_set_property(struct power_supply *psy,
+ 			     const union power_supply_propval *val)
+ {
+ 	struct smb5_chip *chip = power_supply_get_drvdata(psy);
++	unsigned int limit;
++	bool typec_limit;
++	int rc, charger_type;
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_CURRENT_MAX:
+-		return smb5_set_current_limit(chip, val->intval);
++		if (val->intval < 0)
++			return -EINVAL;
++		mutex_lock(&chip->input_lock);
++		rc = smb5_get_typec_limit(chip, &limit, &typec_limit);
++		if (rc)
++			goto unlock;
++		if (!typec_limit) {
++			rc = smb5_apsd_get_charger_type(chip, &charger_type);
++			if (!rc && (charger_type == POWER_SUPPLY_USB_TYPE_CDP ||
++				    charger_type == POWER_SUPPLY_USB_TYPE_DCP))
++				limit = DCP_CURRENT_UA;
++		}
++		if ((unsigned int)val->intval > limit) {
++			rc = -EINVAL;
++			goto unlock;
++		}
++		rc = smb5_apply_input_limit(chip, val->intval, typec_limit);
++unlock:
++		mutex_unlock(&chip->input_lock);
++		return rc;
+ 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+ 		return smb5_set_prop_charging_enabled(chip, val->intval);
+ 	default:
+@@ -686,6 +874,8 @@ static irqreturn_t smb5_handle_batt_overvoltage(int irq, void *data)
+ static irqreturn_t smb5_handle_usb_plugin(int irq, void *data)
+ {
+ 	struct smb5_chip *chip = data;
++	if (READ_ONCE(chip->shutting_down))
++		return IRQ_HANDLED;
+ 
+ 	power_supply_changed(chip->chg_psy);
+ 
+@@ -725,7 +915,12 @@ static const struct power_supply_desc smb5_psy_desc = {
+ 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+  		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+-		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
++		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
++		     BIT(POWER_SUPPLY_USB_TYPE_C) |
++		     BIT(POWER_SUPPLY_USB_TYPE_PD) |
++		     BIT(POWER_SUPPLY_USB_TYPE_PD_PPS) |
++		     BIT(POWER_SUPPLY_USB_TYPE_PD_SPR_AVS) |
++		     BIT(POWER_SUPPLY_USB_TYPE_PD_PPS_SPR_AVS),
+ 	.properties = smb5_properties,
+ 	.num_properties = ARRAY_SIZE(smb5_properties),
+ 	.get_property = smb5_get_property,
+@@ -735,6 +930,9 @@ static const struct power_supply_desc smb5_psy_desc = {
+ 
+ /* Init sequence derived from vendor downstream driver */
+ static const struct smb5_register smb5_init_seq[] = {
++	{ .addr = USBIN_CURRENT_LIMIT_CFG,
++	  .mask = USBIN_CURRENT_LIMIT_MASK,
++	  .val = SDP_CURRENT_UA / CURRENT_SCALE_FACTOR },
+ 	{ .addr = USBIN_CMD_IL, .mask = USBIN_SUSPEND_BIT, .val = 0 },
+ 	{ .addr = AICL_RERUN_TIME_CFG, .mask = AICL_RERUN_TIME_MASK, .val = 3 },
+ 	/* Enable auto-recharge using SOC threshold (set to 98% separately) */
+@@ -866,6 +1064,17 @@ static int smb5_probe(struct platform_device *pdev)
+ 
+ 	chip->dev = &pdev->dev;
+ 	chip->name = pdev->name;
++	mutex_init(&chip->input_lock);
++
++	if (device_property_present(chip->dev, "power-supplies")) {
++		chip->usb_psy = devm_power_supply_get_by_reference(chip->dev,
++								   "power-supplies");
++		if (IS_ERR(chip->usb_psy))
++			return dev_err_probe(chip->dev, PTR_ERR(chip->usb_psy),
++					     "Couldn't get Type-C power supply\n");
++		if (!chip->usb_psy)
++			return -EPROBE_DEFER;
++	}
+ 
+ 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+ 	if (!chip->regmap)
+@@ -964,6 +1173,17 @@ static int smb5_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, chip);
+ 
++	if (chip->usb_psy) {
++		chip->usb_nb.notifier_call = smb5_usb_changed;
++		rc = power_supply_reg_notifier(&chip->usb_nb);
++		if (rc)
++			return rc;
++		rc = devm_add_action_or_reset(chip->dev,
++					      smb5_unregister_usb_notifier, chip);
++		if (rc)
++			return rc;
++	}
++
+ 	/* Initialise charger state */
+ 	schedule_delayed_work(&chip->status_change_work, 0);
+ 
+@@ -1014,6 +1234,17 @@ MODULE_DEVICE_TABLE(of, smb5_match_id_table);
+ static void smb5_shutdown(struct platform_device *pdev)
+ {
+ 	struct smb5_chip *chip = platform_get_drvdata(pdev);
++	int rc;
++
++	WRITE_ONCE(chip->shutting_down, true);
++	if (chip->usb_psy) {
++		devm_remove_action(chip->dev, smb5_unregister_usb_notifier, chip);
++		smb5_unregister_usb_notifier(chip);
++	}
++	cancel_delayed_work_sync(&chip->status_change_work);
++	rc = smb5_apply_input_limit(chip, SDP_CURRENT_UA, false);
++	if (rc)
++		dev_warn(chip->dev, "Couldn't restore USB500 for shutdown: %d\n", rc);
+ 
+ 	/*
+ 	 * Park the charger the way the vendor driver does before any
+-- 
+2.47.3
+

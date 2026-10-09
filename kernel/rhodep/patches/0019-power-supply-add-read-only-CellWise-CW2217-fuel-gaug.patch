@@ -1,0 +1,364 @@
+From b14eca5b53bac3f865e2b05d43ccc47e3015259f Mon Sep 17 00:00:00 2001
+From: crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 17:50:32 +0000
+Subject: [PATCH 19/20] power: supply: add read-only CellWise CW2217 fuel gauge
+
+Expose the running CW2217 state-of-charge, voltage, signed current,
+temperature, cycle count and state-of-health estimate through
+power_supply. Check the chip identity, firmware family, active mode,
+loaded-profile flag and ready state. Propagate transport and
+readiness errors rather than returning invented readings, and retry
+words whose high byte rolled over.
+
+Do not reset the chip or load a generic battery profile: the
+bootloader already initialized the battery-specific profile on
+rhodep. Forbid register writes in regmap and require an explicit
+current-sense resistor. A read-only module parameter supplies that
+resistor for reversible I2C new_device trials without a firmware
+node. Firmware devices use the DT property.
+
+Register units follow the CW2217 support in the vendor reference:
+https://github.com/rockchip-linux/kernel/blob/develop-6.1/drivers/power/supply/cw221x_battery.c
+
+The supplied tests compile the actual driver routines with a fake
+read-only transport, cover all signed current values, register
+rollover, readiness and I2C errors, and verify the sampled rhodep
+units.
+---
+ MAINTAINERS                           |   1 +
+ drivers/power/supply/Kconfig          |  13 ++
+ drivers/power/supply/Makefile         |   1 +
+ drivers/power/supply/cw2217_battery.c | 273 ++++++++++++++++++++++++++
+ 4 files changed, 288 insertions(+)
+ create mode 100644 drivers/power/supply/cw2217_battery.c
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 85fe2582a..27bb30007 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -5968,6 +5968,7 @@ CELLWISE CW2217 FUEL GAUGE DRIVER
+ M:	crazynucfan <127292955+crazynucfan@users.noreply.github.com>
+ S:	Maintained
+ F:	Documentation/devicetree/bindings/power/supply/cellwise,cw2217.yaml
++F:	drivers/power/supply/cw2217_battery.c
+ 
+ CEPH COMMON CODE (LIBCEPH)
+ M:	Ilya Dryomov <idryomov@gmail.com>
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index ece846064..130313e29 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -141,6 +141,19 @@ config BATTERY_CW2015
+ 	  This driver can also be built as a module. If so, the module will be
+ 	  called cw2015_battery.
+ 
++config BATTERY_CW2217
++	tristate "CellWise CW2217 read-only fuel gauge"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Expose battery voltage, current, state of charge, temperature and
++	  gauge cycle/health estimates from an already initialized CW2217.
++	  The bootloader must have loaded the correct battery profile; this
++	  driver never resets the gauge or changes its configuration.
++
++	  To compile this driver as a module, choose M here: the module is
++	  called cw2217_battery.
++
+ config BATTERY_DS2760
+ 	tristate "DS2760 battery driver (HP iPAQ & others)"
+ 	depends on W1
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 31fe4a145..5deff3c32 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -27,6 +27,7 @@ obj-$(CONFIG_CHARGER_AXP20X)	+= axp20x_ac_power.o
+ obj-$(CONFIG_BATTERY_CHAGALL)	+= chagall-battery.o
+ obj-$(CONFIG_BATTERY_CPCAP)	+= cpcap-battery.o
+ obj-$(CONFIG_BATTERY_CW2015)	+= cw2015_battery.o
++obj-$(CONFIG_BATTERY_CW2217)	+= cw2217_battery.o
+ obj-$(CONFIG_BATTERY_DS2760)	+= ds2760_battery.o
+ obj-$(CONFIG_BATTERY_DS2780)	+= ds2780_battery.o
+ obj-$(CONFIG_BATTERY_DS2781)	+= ds2781_battery.o
+diff --git a/drivers/power/supply/cw2217_battery.c b/drivers/power/supply/cw2217_battery.c
+new file mode 100644
+index 000000000..bba80f4cb
+--- /dev/null
++++ b/drivers/power/supply/cw2217_battery.c
+@@ -0,0 +1,273 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Read-only CellWise CW2217 fuel gauge support.
++ *
++ * The bootloader/stock firmware must have activated the gauge and loaded
++ * the battery-specific profile. Preserve that profile and running estimate.
++ */
++#include <linux/i2c.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++
++#define CW2217_CHIP_ID		0x00
++#define CW2217_VOLTAGE		0x02
++#define CW2217_SOC		0x04
++#define CW2217_TEMP		0x06
++#define CW2217_MODE		0x08
++#define CW2217_SOC_ALERT		0x0b
++#define CW2217_CURRENT		0x0e
++#define CW2217_CYCLES		0xa4
++#define CW2217_SOH		0xa6
++#define CW2217_STATE		0xa7
++#define CW2217_FW_VERSION	0xab
++#define CW2217_ID		0xa0
++#define CW2217_PROFILE_READY	BIT(7)
++#define CW2217_READY		GENMASK(3, 2)
++
++/* For a reversible trial using I2C new_device without a firmware node. */
++static unsigned int shunt_resistor_micro_ohms;
++module_param(shunt_resistor_micro_ohms, uint, 0444);
++MODULE_PARM_DESC(shunt_resistor_micro_ohms,
++		 "Sense resistor in micro-ohms for non-firmware I2C devices");
++
++struct cw2217 {
++	struct regmap *regmap;
++	u32 shunt_uohms;
++};
++
++static int cw2217_read_word(struct cw2217 *cw, unsigned int reg, u16 *value)
++{
++	unsigned int high;
++	u8 buf[2];
++	int ret, i;
++
++	/* Retry if the high byte rolled over while the low byte was read. */
++	for (i = 0; i < 3; i++) {
++		ret = regmap_bulk_read(cw->regmap, reg, buf, sizeof(buf));
++		if (ret)
++			return ret;
++		ret = regmap_read(cw->regmap, reg, &high);
++		if (ret)
++			return ret;
++		if (high == buf[0]) {
++			*value = (buf[0] << 8) | buf[1];
++			return 0;
++		}
++	}
++	return -EAGAIN;
++}
++
++static int cw2217_check_ready(struct cw2217 *cw)
++{
++	unsigned int mode, alert, state, fw;
++	int ret;
++
++	ret = regmap_read(cw->regmap, CW2217_MODE, &mode);
++	if (ret)
++		return ret;
++	ret = regmap_read(cw->regmap, CW2217_SOC_ALERT, &alert);
++	if (ret)
++		return ret;
++	ret = regmap_read(cw->regmap, CW2217_STATE, &state);
++	if (ret)
++		return ret;
++	ret = regmap_read(cw->regmap, CW2217_FW_VERSION, &fw);
++	if (ret)
++		return ret;
++	if (mode || !(alert & CW2217_PROFILE_READY) ||
++	    (state & CW2217_READY) != CW2217_READY)
++		return -EAGAIN;
++	/* Shared chip ID, but different current scales on CW2215/CW2218. */
++	if ((fw & GENMASK(7, 6)) != BIT(6))
++		return -ENODEV;
++	return 0;
++}
++
++static int cw2217_voltage_uv(u16 raw)
++{
++	return (raw & GENMASK(13, 0)) * 625 / 2;
++}
++
++static int cw2217_capacity(u16 raw)
++{
++	return min_t(unsigned int, raw >> 8, 100);
++}
++
++static int cw2217_current_ua(struct cw2217 *cw, u16 raw)
++{
++	/* Signed 16-bit ADC, 52.4 mV full scale, across the board's shunt. */
++	return div_s64((s64)(s16)raw * 1600000, cw->shunt_uohms);
++}
++
++static int cw2217_get_property(struct power_supply *psy,
++			       enum power_supply_property prop,
++			       union power_supply_propval *val)
++{
++	struct cw2217 *cw = power_supply_get_drvdata(psy);
++	unsigned int raw8;
++	u16 raw;
++	int ret;
++
++	if (prop == POWER_SUPPLY_PROP_MODEL_NAME) {
++		val->strval = "CW2217";
++		return 0;
++	}
++	if (prop == POWER_SUPPLY_PROP_MANUFACTURER) {
++		val->strval = "CellWise";
++		return 0;
++	}
++	ret = cw2217_check_ready(cw);
++	if (ret)
++		return ret;
++
++	switch (prop) {
++	case POWER_SUPPLY_PROP_PRESENT:
++		val->intval = 1;
++		return 0;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		ret = cw2217_read_word(cw, CW2217_SOC, &raw);
++		if (!ret)
++			val->intval = cw2217_capacity(raw);
++		return ret;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = cw2217_read_word(cw, CW2217_VOLTAGE, &raw);
++		if (!ret)
++			val->intval = cw2217_voltage_uv(raw);
++		return ret;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = cw2217_read_word(cw, CW2217_CURRENT, &raw);
++		if (ret)
++			return ret;
++		val->intval = cw2217_current_ua(cw, raw);
++		if (prop == POWER_SUPPLY_PROP_CURRENT_NOW)
++			return 0;
++		if (val->intval > 0)
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++		else if (val->intval < 0)
++			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
++		else
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		return 0;
++	case POWER_SUPPLY_PROP_TEMP:
++		ret = regmap_read(cw->regmap, CW2217_TEMP, &raw8);
++		if (!ret)
++			val->intval = (int)raw8 * 5 - 400;
++		return ret;
++	case POWER_SUPPLY_PROP_CYCLE_COUNT:
++		ret = cw2217_read_word(cw, CW2217_CYCLES, &raw);
++		if (!ret)
++			val->intval = raw / 16;
++		return ret;
++	case POWER_SUPPLY_PROP_STATE_OF_HEALTH:
++		ret = regmap_read(cw->regmap, CW2217_SOH, &raw8);
++		if (!ret)
++			val->intval = min(raw8, 100U);
++		return ret;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const enum power_supply_property cw2217_properties[] = {
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_CYCLE_COUNT,
++	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++	POWER_SUPPLY_PROP_MANUFACTURER,
++};
++
++static const struct power_supply_desc cw2217_desc = {
++	.name = "cw2217-battery",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = cw2217_properties,
++	.num_properties = ARRAY_SIZE(cw2217_properties),
++	.get_property = cw2217_get_property,
++};
++
++static bool cw2217_writeable_reg(struct device *dev, unsigned int reg)
++{
++	return false;
++}
++
++static const struct regmap_config cw2217_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = CW2217_FW_VERSION,
++	.cache_type = REGCACHE_NONE,
++	.writeable_reg = cw2217_writeable_reg,
++};
++
++static int cw2217_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config psy_cfg = {};
++	struct power_supply *psy;
++	struct cw2217 *cw;
++	unsigned int id;
++	int ret;
++
++	cw = devm_kzalloc(dev, sizeof(*cw), GFP_KERNEL);
++	if (!cw)
++		return -ENOMEM;
++	ret = device_property_read_u32(dev, "shunt-resistor-micro-ohms",
++				       &cw->shunt_uohms);
++	if (ret && !dev_fwnode(dev))
++		cw->shunt_uohms = shunt_resistor_micro_ohms;
++	else if (ret)
++		return dev_err_probe(dev, ret, "Missing sense resistor\n");
++	if (cw->shunt_uohms < 1000 || cw->shunt_uohms > 1000000)
++		return dev_err_probe(dev, -EINVAL, "Invalid sense resistor\n");
++
++	cw->regmap = devm_regmap_init_i2c(client, &cw2217_regmap_config);
++	if (IS_ERR(cw->regmap))
++		return PTR_ERR(cw->regmap);
++	ret = regmap_read(cw->regmap, CW2217_CHIP_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "Cannot read gauge identity\n");
++	if (id != CW2217_ID)
++		return dev_err_probe(dev, -ENODEV, "Unexpected gauge identity\n");
++	ret = cw2217_check_ready(cw);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Gauge is not an initialized CW2217\n");
++
++	psy_cfg.drv_data = cw;
++	psy_cfg.fwnode = dev_fwnode(dev);
++	psy = devm_power_supply_register(dev, &cw2217_desc, &psy_cfg);
++	return PTR_ERR_OR_ZERO(psy);
++}
++
++static const struct of_device_id cw2217_of_match[] = {
++	{ .compatible = "cellwise,cw2217" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, cw2217_of_match);
++
++static const struct i2c_device_id cw2217_id[] = {
++	{ "cw2217" },
++	{}
++};
++MODULE_DEVICE_TABLE(i2c, cw2217_id);
++
++static struct i2c_driver cw2217_driver = {
++	.driver = {
++		.name = "cw2217-battery",
++		.of_match_table = cw2217_of_match,
++	},
++	.probe = cw2217_probe,
++	.id_table = cw2217_id,
++};
++module_i2c_driver(cw2217_driver);
++
++MODULE_AUTHOR("crazynucfan <127292955+crazynucfan@users.noreply.github.com>");
++MODULE_DESCRIPTION("Read-only CellWise CW2217 battery fuel gauge");
++MODULE_LICENSE("GPL");
+-- 
+2.47.3
+

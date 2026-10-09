@@ -40,10 +40,13 @@ linux-mdss-dsi-panel-driver-generator from the vendor device tree.
 Patch 0001 is royka1's
 [postmarketOS port](https://gitlab.postmarketos.org/royka1/linux) branch
 `apollo-7.1` at `71aebd11db5d`, reduced to what the node configuration
-compiles and rebased onto v7.2 (now v7.2.9). Patches 0002 to 0005 are written
-for this series: 0003 is rhodep's 0012, and the others are `apollo_defconfig`
-options. The loader kernel an apollo keeps in its boot partition is
-royka1's branch itself, built with postmarketOS's configuration.
+compiles and rebased onto v7.2 (now v7.2.9). Patches 0002 to 0006 are written
+for this series: 0003 is rhodep's 0012, 0002, 0004 and 0005 are
+`apollo_defconfig` options, and 0006 changes the port's `qcom_pm8150b_charger`
+driver. Its register sequence follows Qualcomm's downstream
+[`smb5-lib.c`](https://android.googlesource.com/kernel/msm/+/b6410c3f75259c0ca2df45a01838d2e46272723e/drivers/power/supply/qcom/smb5-lib.c).
+The loader kernel an apollo keeps in its boot partition is royka1's branch
+itself, built with postmarketOS's configuration.
 
 Authors of the 215 commits that branch adds to v7.1, by commit count:
 
@@ -98,6 +101,11 @@ The rhodep patches are written for this series. What they build on:
   `qcom_glink` and `qcom_rmtfs_mem`, and the lockup and pseudo-NMI options in
   the defconfig) are written for this series against upstream code. Their
   commit messages name no other source.
+- 0018 to 0020 (the CellWise CW2217 binding, the read-only `cw2217_battery`
+  driver and the gauge's device tree node) are written for this series. The
+  register units follow the CW2217 support in Rockchip's kernel,
+  [`cw221x_battery.c`](https://github.com/rockchip-linux/kernel/blob/develop-6.1/drivers/power/supply/cw221x_battery.c),
+  and the 5 mΩ sense resistor is the value in Motorola's stock device tree.
 - The [MobileLinux](https://github.com/d4rks1d33/MobileLinux) rhodep port was
   consulted along the way.
 
